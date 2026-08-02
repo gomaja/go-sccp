@@ -26,8 +26,9 @@ Implemented:
   lengths.
 - Fuzz targets for top-level message parsing and parameter parsing.
 - Initial ITU-T Q.714 (05/01) connection-section helpers for CC/CREF setup
-  outcomes, RLSD/RLC release handling, reference mismatch detection, and frozen
-  reference state.
+  outcomes, RLSD/RLC release handling, reference mismatch detection, frozen
+  reference state, class 2 DT1 data transfer, and class 3 DT2/AK sequence and
+  flow-control windows.
 - In-memory SCCP stack core for local subsystem registration, connectionless
   N-UNITDATA delivery, UDTS/XUDTS/LUDTS return generation, N-NOTICE delivery,
   and connection-oriented section lifecycle orchestration.
@@ -39,9 +40,9 @@ Remaining stack work:
 - Q.714 global title translation, relay routing, compatibility tests, message
   type changes, segmentation, reassembly, and management procedure integration.
 - Q.714 freeze/guard timers and relay coupling for multi-section connections.
-- Q.714 class 2/class 3 connection-oriented data-transfer procedures.
-- Q.714 class 3 reset, sequencing, flow control, expedited data, inactivity
-  testing, and timer behavior.
+- Q.714 class 3 reset, expedited data, inactivity testing, and timer behavior.
+- Q.714 connection-oriented segmentation/reassembly across multiple DT
+  messages.
 
 See [docs/standards.md](docs/standards.md) for the standards baseline, errata
 policy, open-source survey, and detailed compliance ledger.

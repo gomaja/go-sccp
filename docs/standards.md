@@ -82,12 +82,14 @@ implementations.
   registers local subsystems, orchestrates local connection-section lifecycle
   messages, delivers locally addressed UDT/XUDT/LUDT messages, generates
   UDTS/XUDTS/LUDTS responses when return-on-error is requested, and produces
-  notice indications for received service messages. The remaining procedure
-  work includes guard/freeze timers, relay-node coupling, global title
-  translation, compatibility tests, message type changes, segmentation,
-  reassembly, class 2/class 3 data-transfer state transitions, reset handling,
-  sequencing, flow control, inactivity testing, and timer behavior from
-  ITU-T Q.714 (05/01).
+  notice indications for received service messages. Connection-oriented
+  data-transfer procedures now cover class 2 DT1 indications and class 3
+  modulo-128 DT2/AK sequence and flow-control windows from ITU-T Q.714
+  (05/01), sections 3.5.1 and 3.5.2. The remaining procedure work includes
+  guard/freeze timers, relay-node coupling, global title translation,
+  compatibility tests, message type changes, segmentation and reassembly across
+  multiple DT messages, class 3 reset handling, expedited data, inactivity
+  testing, and timer behavior from ITU-T Q.714 (05/01).
 - Connectionless service messages are implemented from ITU-T Q.713 (03/01),
   sections 4.11, 4.19, 4.20, and 4.21. Long data enforces the Q.713 section
   3.20 SCCP-user-data range of 1 to 3952 octets.

@@ -162,6 +162,13 @@ var cases = []struct {
 			return params.ParseSequencingSegmenting(b)
 		},
 	}, {
+		description: "SequencingSegmenting/Sequence 127",
+		structured:  params.NewSequencingSegmenting(0xfe, 0xfe, false),
+		serialized:  []byte{0xfe, 0xfe},
+		parseFunc: func(b []byte) (serializable, int, error) {
+			return params.ParseSequencingSegmenting(b)
+		},
+	}, {
 		description: "Credit/Fixed",
 		structured:  params.NewCredit(0x77),
 		serialized:  []byte{0x77},

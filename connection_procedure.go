@@ -17,6 +17,20 @@ var (
 
 	// ErrReferenceMismatch reports a message that does not address this connection section.
 	ErrReferenceMismatch = errors.New("sccp: connection reference mismatch")
+
+	// ErrFlowControlBlocked reports that class 3 flow control does not authorize more DT2 transfer.
+	ErrFlowControlBlocked = errors.New("sccp: flow control blocked")
+
+	// ErrSequenceMismatch reports a class 3 sequence number outside the valid send or receive window.
+	ErrSequenceMismatch = errors.New("sccp: sequence mismatch")
+
+	// ErrInvalidCredit reports a class 3 credit outside the Q.714 window-size range.
+	ErrInvalidCredit = errors.New("sccp: invalid credit")
+)
+
+const (
+	sccpSequenceModulus = 128
+	maxConnectionCredit = 127
 )
 
 // ConnectionState identifies the local procedure state of a connection section.
@@ -56,11 +70,28 @@ func (s ConnectionState) String() string {
 // known. Section 3.3.2 requires released local references to remain frozen
 // before reuse; this helper keeps the reference visible while State is frozen.
 type ConnectionSection struct {
+	LocalReference         uint32
+	RemoteReference        uint32
+	ProtocolClass          int
+	Credit                 uint8
+	SendCredit             uint8
+	State                  ConnectionState
+	SendSequenceNumber     uint8
+	ReceiveSequenceNumber  uint8
+	SendWindowLowerEdge    uint8
+	ReceiveWindowLowerEdge uint8
+	receivedSinceAck       uint8
+}
+
+// DataIndication represents an N-DATA indication delivered to a local SCCP user.
+type DataIndication struct {
+	Message         Message
 	LocalReference  uint32
 	RemoteReference uint32
 	ProtocolClass   int
-	Credit          uint8
-	State           ConnectionState
+	MoreData        bool
+	Data            []byte
+	Acknowledgement *AK
 }
 
 // NewPendingConnectionSection creates an originating section after CR transfer.
@@ -72,6 +103,7 @@ func NewPendingConnectionSection(localReference uint32, protocolClass int, credi
 		LocalReference: localReference,
 		ProtocolClass:  protocolClass,
 		Credit:         credit,
+		SendCredit:     credit,
 		State:          ConnectionStatePending,
 	}
 }
@@ -83,6 +115,7 @@ func NewEstablishedConnectionSection(localReference, remoteReference uint32, pro
 		RemoteReference: remoteReference,
 		ProtocolClass:   protocolClass,
 		Credit:          credit,
+		SendCredit:      credit,
 		State:           ConnectionStateEstablished,
 	}
 }
@@ -114,6 +147,7 @@ func (s *ConnectionSection) HandleConnectionConfirm(confirm *CC) error {
 	if confirm.Credit != nil {
 		s.Credit = confirm.Credit.Value()
 	}
+	s.SendCredit = s.Credit
 	s.State = ConnectionStateEstablished
 	return nil
 }
@@ -199,6 +233,198 @@ func (s *ConnectionSection) HandleReleased(released *RLSD) (*RLC, error) {
 	return complete, nil
 }
 
+// SendData applies Q.714 data-transfer procedures and returns the DT message to transfer.
+//
+// ITU-T Q.714 (05/01), section 3.5.1 uses DT1 for basic class 2 data transfer.
+// Sections 3.5.2.1 through 3.5.2.4 apply modulo-128 DT2 sequence numbering
+// and per-direction flow-control windows to class 3 only.
+func (s *ConnectionSection) SendData(data []byte, moreData bool) (Message, error) {
+	if err := s.requireState(ConnectionStateEstablished, "data transfer"); err != nil {
+		return nil, err
+	}
+
+	switch s.ProtocolClass {
+	case 2:
+		return NewDT1(s.RemoteReference, moreData, cloneBytes(data)), nil
+	case 3:
+		if err := validateCredit(s.Credit); err != nil {
+			return nil, err
+		}
+		if s.SendCredit == 0 {
+			return nil, ErrFlowControlBlocked
+		}
+		if s.SendCredit > maxConnectionCredit {
+			return nil, fmt.Errorf("%w: send credit %d exceeds %d", ErrInvalidCredit, s.SendCredit, maxConnectionCredit)
+		}
+		if !sequenceWithinWindow(s.SendWindowLowerEdge, s.SendSequenceNumber, s.SendCredit) {
+			return nil, fmt.Errorf("%w: send sequence %d outside window [%d,%d)",
+				ErrFlowControlBlocked,
+				s.SendSequenceNumber,
+				s.SendWindowLowerEdge,
+				int(s.SendWindowLowerEdge)+int(s.SendCredit),
+			)
+		}
+
+		message := NewDT2(
+			s.RemoteReference,
+			EncodeSequenceNumber(s.SendSequenceNumber),
+			EncodeSequenceNumber(s.ReceiveSequenceNumber),
+			moreData,
+			cloneBytes(data),
+		)
+		s.SendSequenceNumber = nextSequenceNumber(s.SendSequenceNumber)
+		return message, nil
+	default:
+		return nil, fmt.Errorf("%w: data transfer requires protocol class 2 or 3, got %d", ErrInvalidConnectionState, s.ProtocolClass)
+	}
+}
+
+// HandleDataForm1 applies class 2 DT1 receive procedures and returns the local data indication.
+//
+// ITU-T Q.714 (05/01), sections 3.5.1.3 and 3.5.3 deliver complete or
+// segmented user data to the destination SCCP user according to the M-bit.
+func (s *ConnectionSection) HandleDataForm1(data *DT1) (DataIndication, error) {
+	if err := s.requireState(ConnectionStateEstablished, "data form 1"); err != nil {
+		return DataIndication{}, err
+	}
+	if s.ProtocolClass != 2 {
+		return DataIndication{}, fmt.Errorf("%w: DT1 requires protocol class 2, got %d", ErrInvalidConnectionState, s.ProtocolClass)
+	}
+	if data == nil {
+		return DataIndication{}, fmt.Errorf("%w: nil DT1", ErrReferenceMismatch)
+	}
+	if err := s.matchDestinationReference(data.DestinationLocalReference); err != nil {
+		return DataIndication{}, err
+	}
+	if data.SegmentingReassembling == nil {
+		return DataIndication{}, fmt.Errorf("%w: DT1 missing segmenting/reassembling", ErrInvalidStackMessage)
+	}
+	payload, err := connectionDataValue("DT1", data.Data)
+	if err != nil {
+		return DataIndication{}, err
+	}
+
+	return DataIndication{
+		Message:         data,
+		LocalReference:  s.LocalReference,
+		RemoteReference: s.RemoteReference,
+		ProtocolClass:   s.ProtocolClass,
+		MoreData:        data.SegmentingReassembling.MoreData(),
+		Data:            payload,
+	}, nil
+}
+
+// HandleDataForm2 applies class 3 DT2 receive, acknowledgement, and window procedures.
+//
+// ITU-T Q.714 (05/01), sections 3.5.2.4.1 and 3.5.2.4.3 require DT2 P(S) to
+// be the next expected modulo-128 sequence number and P(R) to advance within
+// the sender's outstanding window. Section 3.5.2.4.2 requires AK generation at
+// the receiving upper window edge when no DT2 is available for piggybacking.
+func (s *ConnectionSection) HandleDataForm2(data *DT2) (DataIndication, error) {
+	if err := s.requireState(ConnectionStateEstablished, "data form 2"); err != nil {
+		return DataIndication{}, err
+	}
+	if s.ProtocolClass != 3 {
+		return DataIndication{}, fmt.Errorf("%w: DT2 requires protocol class 3, got %d", ErrInvalidConnectionState, s.ProtocolClass)
+	}
+	if err := validateCredit(s.Credit); err != nil {
+		return DataIndication{}, err
+	}
+	if data == nil {
+		return DataIndication{}, fmt.Errorf("%w: nil DT2", ErrReferenceMismatch)
+	}
+	if err := s.matchDestinationReference(data.DestinationLocalReference); err != nil {
+		return DataIndication{}, err
+	}
+	if data.SequencingSegmenting == nil {
+		return DataIndication{}, fmt.Errorf("%w: DT2 missing sequencing/segmenting", ErrInvalidStackMessage)
+	}
+	payload, err := connectionDataValue("DT2", data.Data)
+	if err != nil {
+		return DataIndication{}, err
+	}
+
+	receivedSequence := DecodeSequenceNumber(data.SequencingSegmenting.SendSequenceNumber)
+	if receivedSequence != s.ReceiveSequenceNumber {
+		return DataIndication{}, fmt.Errorf("%w: received P(S) %d, want %d", ErrSequenceMismatch, receivedSequence, s.ReceiveSequenceNumber)
+	}
+	if !sequenceWithinWindow(s.ReceiveWindowLowerEdge, receivedSequence, s.Credit) {
+		return DataIndication{}, fmt.Errorf("%w: received P(S) %d outside receive window", ErrSequenceMismatch, receivedSequence)
+	}
+	if err := s.updateSendingWindow(data.SequencingSegmenting.ReceiveSequenceNumber); err != nil {
+		return DataIndication{}, err
+	}
+
+	s.ReceiveSequenceNumber = nextSequenceNumber(s.ReceiveSequenceNumber)
+	s.receivedSinceAck++
+
+	var acknowledgement *AK
+	if s.receivedSinceAck >= s.Credit {
+		acknowledgement = NewAK(s.RemoteReference, EncodeSequenceNumber(s.ReceiveSequenceNumber), s.Credit)
+		s.ReceiveWindowLowerEdge = s.ReceiveSequenceNumber
+		s.receivedSinceAck = 0
+	}
+
+	return DataIndication{
+		Message:         data,
+		LocalReference:  s.LocalReference,
+		RemoteReference: s.RemoteReference,
+		ProtocolClass:   s.ProtocolClass,
+		MoreData:        data.SequencingSegmenting.MoreData,
+		Data:            payload,
+		Acknowledgement: acknowledgement,
+	}, nil
+}
+
+// HandleAcknowledgement applies class 3 AK receive procedures.
+//
+// ITU-T Q.714 (05/01), section 3.5.2.4.3 uses P(R) in AK to set the lower
+// edge of the sender window, and section 3.5.2.4.2 uses AK credit zero to stop
+// DT2 transfer until a later positive-credit AK or reset.
+func (s *ConnectionSection) HandleAcknowledgement(acknowledgement *AK) error {
+	if err := s.requireState(ConnectionStateEstablished, "acknowledgement"); err != nil {
+		return err
+	}
+	if s.ProtocolClass != 3 {
+		return fmt.Errorf("%w: AK requires protocol class 3, got %d", ErrInvalidConnectionState, s.ProtocolClass)
+	}
+	if acknowledgement == nil {
+		return fmt.Errorf("%w: nil AK", ErrReferenceMismatch)
+	}
+	if err := s.matchDestinationReference(acknowledgement.DestinationLocalReference); err != nil {
+		return err
+	}
+	if acknowledgement.ReceiveSequenceNumber == nil {
+		return fmt.Errorf("%w: AK missing receive sequence number", ErrInvalidStackMessage)
+	}
+	if acknowledgement.Credit == nil {
+		return fmt.Errorf("%w: AK missing credit", ErrInvalidStackMessage)
+	}
+	credit := acknowledgement.Credit.Value()
+	if credit > maxConnectionCredit {
+		return fmt.Errorf("%w: AK credit %d exceeds %d", ErrInvalidCredit, credit, maxConnectionCredit)
+	}
+	if credit != 0 && credit != s.Credit {
+		return fmt.Errorf("%w: AK credit %d does not match established credit %d", ErrInvalidCredit, credit, s.Credit)
+	}
+	if err := s.updateSendingWindow(acknowledgement.ReceiveSequenceNumber.Value()); err != nil {
+		return err
+	}
+
+	s.SendCredit = credit
+	return nil
+}
+
+// EncodeSequenceNumber returns the Q.713 sequence-number octet for a decoded modulo-128 value.
+func EncodeSequenceNumber(n uint8) uint8 {
+	return (n & 0b01111111) << 1
+}
+
+// DecodeSequenceNumber returns the decoded modulo-128 value from a Q.713 sequence-number octet.
+func DecodeSequenceNumber(encoded uint8) uint8 {
+	return (encoded & 0b11111110) >> 1
+}
+
 func (s *ConnectionSection) freeze() {
 	s.State = ConnectionStateFrozen
 }
@@ -269,4 +495,56 @@ func sourceReference(ref *params.LocalReference) (uint32, error) {
 		return 0, fmt.Errorf("%w: missing source local reference", ErrReferenceMismatch)
 	}
 	return ref.Uint32(), nil
+}
+
+func connectionDataValue(procedure string, data *params.Data) ([]byte, error) {
+	if data == nil {
+		return nil, fmt.Errorf("%w: %s missing data", ErrInvalidStackMessage, procedure)
+	}
+	return cloneBytes(data.Value()), nil
+}
+
+func validateCredit(credit uint8) error {
+	if credit == 0 {
+		return ErrFlowControlBlocked
+	}
+	if credit > maxConnectionCredit {
+		return fmt.Errorf("%w: credit %d exceeds %d", ErrInvalidCredit, credit, maxConnectionCredit)
+	}
+	return nil
+}
+
+func nextSequenceNumber(n uint8) uint8 {
+	return (n + 1) % sccpSequenceModulus
+}
+
+func sequenceWithinWindow(lowerEdge, sequence, credit uint8) bool {
+	if credit == 0 || credit > maxConnectionCredit {
+		return false
+	}
+	return sequenceDistance(lowerEdge, sequence) < int(credit)
+}
+
+func (s *ConnectionSection) updateSendingWindow(encodedReceiveSequence uint8) error {
+	receiveSequence := DecodeSequenceNumber(encodedReceiveSequence)
+	if sequenceDistance(s.SendWindowLowerEdge, receiveSequence) > sequenceDistance(s.SendWindowLowerEdge, s.SendSequenceNumber) {
+		return fmt.Errorf(
+			"%w: received P(R) %d outside sender window [%d,%d]",
+			ErrSequenceMismatch,
+			receiveSequence,
+			s.SendWindowLowerEdge,
+			s.SendSequenceNumber,
+		)
+	}
+	s.SendWindowLowerEdge = receiveSequence
+	return nil
+}
+
+func sequenceDistance(lowerEdge, sequence uint8) int {
+	lower := lowerEdge & 0b01111111
+	seq := sequence & 0b01111111
+	if seq >= lower {
+		return int(seq - lower)
+	}
+	return sccpSequenceModulus - int(lower) + int(seq)
 }

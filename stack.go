@@ -40,9 +40,10 @@ type Stack struct {
 
 // StackResult contains local delivery, notice, and outbound messages produced by HandleMessage.
 type StackResult struct {
-	Deliveries []UnitdataIndication
-	Notices    []NoticeIndication
-	Outbound   []Message
+	Deliveries      []UnitdataIndication
+	DataIndications []DataIndication
+	Notices         []NoticeIndication
+	Outbound        []Message
 }
 
 // UnitdataIndication represents an N-UNITDATA indication delivered to a local SCCP user.
@@ -127,6 +128,12 @@ func (s *Stack) HandleMessage(message Message) (StackResult, error) {
 		return s.handleReleased(msg)
 	case *RLC:
 		return s.handleReleaseComplete(msg)
+	case *DT1:
+		return s.handleDataForm1(msg)
+	case *DT2:
+		return s.handleDataForm2(msg)
+	case *AK:
+		return s.handleAcknowledgement(msg)
 	default:
 		return StackResult{}, nil
 	}
@@ -329,6 +336,61 @@ func (s *Stack) handleReleaseComplete(complete *RLC) (StackResult, error) {
 		return StackResult{}, err
 	}
 	return StackResult{}, section.HandleReleaseComplete(complete)
+}
+
+func (s *Stack) handleDataForm1(data *DT1) (StackResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if data == nil {
+		return StackResult{}, fmt.Errorf("%w: nil DT1", ErrReferenceMismatch)
+	}
+	section, err := s.connectionForDestinationLocked(data.DestinationLocalReference)
+	if err != nil {
+		return StackResult{}, err
+	}
+	indication, err := section.HandleDataForm1(data)
+	if err != nil {
+		return StackResult{}, err
+	}
+	return StackResult{DataIndications: []DataIndication{indication}}, nil
+}
+
+func (s *Stack) handleDataForm2(data *DT2) (StackResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if data == nil {
+		return StackResult{}, fmt.Errorf("%w: nil DT2", ErrReferenceMismatch)
+	}
+	section, err := s.connectionForDestinationLocked(data.DestinationLocalReference)
+	if err != nil {
+		return StackResult{}, err
+	}
+	indication, err := section.HandleDataForm2(data)
+	if err != nil {
+		return StackResult{}, err
+	}
+
+	result := StackResult{DataIndications: []DataIndication{indication}}
+	if indication.Acknowledgement != nil {
+		result.Outbound = []Message{indication.Acknowledgement}
+	}
+	return result, nil
+}
+
+func (s *Stack) handleAcknowledgement(acknowledgement *AK) (StackResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if acknowledgement == nil {
+		return StackResult{}, fmt.Errorf("%w: nil AK", ErrReferenceMismatch)
+	}
+	section, err := s.connectionForDestinationLocked(acknowledgement.DestinationLocalReference)
+	if err != nil {
+		return StackResult{}, err
+	}
+	return StackResult{}, section.HandleAcknowledgement(acknowledgement)
 }
 
 func (s *Stack) connectionForDestinationLocked(ref *params.LocalReference) (*ConnectionSection, error) {

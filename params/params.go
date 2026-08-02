@@ -962,8 +962,8 @@ func NewSequencingSegmenting(snd, rcv uint8, moreData bool) *SequencingSegmentin
 		paramType:             PTypeF,
 		code:                  PCodeSequencingSegmenting,
 		length:                2,
-		SendSequenceNumber:    snd & 0b01111111,
-		ReceiveSequenceNumber: rcv & 0b01111111,
+		SendSequenceNumber:    snd & 0b11111110,
+		ReceiveSequenceNumber: rcv & 0b11111110,
 		MoreData:              moreData,
 	}
 }
