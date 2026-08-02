@@ -1,0 +1,156 @@
+// Copyright 2019-2024 go-sccp authors. All rights reserved.
+// Use of this source code is governed by a MIT-style license that can be
+// found in the LICENSE file.
+
+// Command client sends given payload on top of SCCP UDT message.
+package main
+
+import (
+	"context"
+	"encoding/hex"
+	"flag"
+	"log"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
+	m3params "github.com/gomaja/go-m3ua/messages/params"
+	"github.com/gomaja/go-sctp"
+
+	"github.com/gomaja/go-sccp"
+	"github.com/gomaja/go-sccp/params"
+	"github.com/gomaja/go-sccp/utils"
+
+	"github.com/gomaja/go-m3ua"
+)
+
+func main() {
+	var (
+		addr  = flag.String("addr", "127.0.0.1:2905", "Remote IP and Port to connect to.")
+		data  = flag.String("data", "deadbeef", "Payload to send on UDT in hex format.")
+		hbInt = flag.Duration("hb-interval", 0, "Interval for M3UA BEAT. Put 0 to disable")
+	)
+	flag.Parse()
+
+	// setup data to send
+	payload, err := hex.DecodeString(*data)
+	if err != nil {
+		log.Fatalf("Failed to decode hex string: %s", err)
+	}
+
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT)
+
+	// create *Config to be used in M3UA connection
+	m3config := m3ua.NewConfig(
+		0x11111111,              // OriginatingPointCode
+		0x22222222,              // DestinationPointCode
+		m3params.ServiceIndSCCP, // ServiceIndicator
+		0,                       // NetworkIndicator
+		0,                       // MessagePriority
+		1,                       // SignalingLinkSelection
+	)
+	m3config. // set parameters to use
+			EnableHeartbeat(*hbInt, 10*time.Second).
+			SetAspIdentifier(1).
+			SetTrafficModeType(m3params.TrafficModeLoadshare).
+			SetNetworkAppearance(0).
+			SetRoutingContexts(1, 2)
+
+	// setup SCTP peer on the specified IPs and Port.
+	raddr, err := sctp.ResolveSCTPAddr("sctp", *addr)
+	if err != nil {
+		log.Fatalf("Failed to resolve SCTP address: %s", err)
+	}
+
+	// setup underlying SCTP/M3UA connection first
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	m3conn, err := m3ua.Dial(ctx, "m3ua", nil, raddr, m3config)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	gti := params.GTITTNPESNAI
+	ai := params.NewAddressIndicator(false, true, false, gti)
+	cdPA := params.NewCalledPartyAddress(
+		ai, 0, 6, params.NewGlobalTitle(
+			gti,
+			params.TranslationType(0),
+			params.NPISDNTelephony,
+			params.ESBCDOdd,
+			params.NAIInternationalNumber,
+			utils.MustBCDEncode("1234567890123456"),
+		),
+	)
+	cgPA := params.NewCallingPartyAddress(
+		ai, 0, 7, params.NewGlobalTitle(
+			gti,
+			params.TranslationType(1),
+			params.NPISDNMobile,
+			params.ESBCDOdd,
+			params.NAIInternationalNumber,
+			utils.MustBCDEncode("9876543210"),
+		),
+	)
+	// create UDT message with CdPA, CgPA and payload
+	udt := sccp.NewUDT(
+		1,    // Protocol Class
+		true, // Message handling
+		cdPA,
+		cgPA,
+		payload, // payload
+	)
+	u, err := udt.MarshalBinary()
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	xudt := sccp.NewXUDT(
+		1,    // Protocol Class
+		true, // Message handling
+		2,    // Hop Counter
+		cdPA,
+		cgPA,
+		payload, // payload
+		params.NewSegmentation(true, 1, 2, 0x123456),
+		params.NewImportance(10),
+	)
+	x, err := xudt.MarshalBinary()
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// send once
+	i := 1
+	log.Printf("Sending %04d: %v", i, udt)
+	if _, err := m3conn.Write(u); err != nil {
+		log.Fatal(err)
+	}
+
+	// send once in 3 seconds
+	for {
+		ticker := time.NewTicker(3 * time.Second)
+		select {
+		case sig := <-sigCh:
+			log.Printf("Got signal: %v, exitting...", sig)
+			ticker.Stop()
+			os.Exit(1)
+		case <-ticker.C:
+			i++
+
+			var msg sccp.Message = udt
+			b := u
+			if i%2 == 0 {
+				msg = xudt
+				b = x
+			}
+
+			log.Printf("Sending %04d: %v", i, msg)
+			if _, err := m3conn.Write(b); err != nil {
+				log.Fatal(err)
+			}
+		}
+	}
+}
