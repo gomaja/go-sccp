@@ -28,14 +28,17 @@ Implemented:
 - Initial ITU-T Q.714 (05/01) connection-section helpers for CC/CREF setup
   outcomes, RLSD/RLC release handling, reference mismatch detection, and frozen
   reference state.
+- In-memory SCCP stack core for local subsystem registration, connectionless
+  N-UNITDATA delivery, UDTS/XUDTS/LUDTS return generation, N-NOTICE delivery,
+  and connection-oriented section lifecycle orchestration.
 - CI for build, tests, race tests, vet, static analysis, vulnerability checks,
   portability, and security scanning.
 
 Remaining stack work:
 
-- Q.714 connectionless routing, return-on-error handling, and management
-  procedure integration.
-- Q.714 local-reference allocation, freeze/guard timers, and relay coupling.
+- Q.714 global title translation, relay routing, compatibility tests, message
+  type changes, segmentation, reassembly, and management procedure integration.
+- Q.714 freeze/guard timers and relay coupling for multi-section connections.
 - Q.714 class 2/class 3 connection-oriented data-transfer procedures.
 - Q.714 class 3 reset, sequencing, flow control, expedited data, inactivity
   testing, and timer behavior.

@@ -78,11 +78,16 @@ implementations.
   connection-section procedure helper now covers the originating-node CC/CREF
   outcomes from ITU-T Q.714 (05/01), sections 3.1.4.2 and 3.2.3, and end-node
   RLSD/RLC release handling and frozen references from sections 3.3.2, 3.3.3,
-  3.3.5, and 3.8.2.2. The remaining procedure work includes reusable
-  reference allocation and guard/freeze timers, relay-node coupling,
-  class 2/class 3 data-transfer state transitions, reset handling, sequencing,
-  flow control, inactivity testing, and timer behavior from ITU-T Q.714
-  (05/01).
+  3.3.5, and 3.8.2.2. The in-memory stack core now allocates local references,
+  registers local subsystems, orchestrates local connection-section lifecycle
+  messages, delivers locally addressed UDT/XUDT/LUDT messages, generates
+  UDTS/XUDTS/LUDTS responses when return-on-error is requested, and produces
+  notice indications for received service messages. The remaining procedure
+  work includes guard/freeze timers, relay-node coupling, global title
+  translation, compatibility tests, message type changes, segmentation,
+  reassembly, class 2/class 3 data-transfer state transitions, reset handling,
+  sequencing, flow control, inactivity testing, and timer behavior from
+  ITU-T Q.714 (05/01).
 - Connectionless service messages are implemented from ITU-T Q.713 (03/01),
   sections 4.11, 4.19, 4.20, and 4.21. Long data enforces the Q.713 section
   3.20 SCCP-user-data range of 1 to 3952 octets.
