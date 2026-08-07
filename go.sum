@@ -1,7 +1,7 @@
 github.com/gomaja/go-m3ua v0.0.0-20260801201958-70391ffd0898 h1:z99RUf5NuOT1uw2TRwSHVHhzB+v2QnaErWma5jWokkA=
 github.com/gomaja/go-m3ua v0.0.0-20260801201958-70391ffd0898/go.mod h1:ZiyjyDgGCbGWUpN9OtQ+sTWtIZz9uVSaARHwV3jR6YI=
-github.com/gomaja/go-sctp v0.0.0-20260801143753-f130f9832d2f h1:a59vm5slFJi3H8CCg5mJxSh3o4aCl4OfuyWreo2HYgM=
-github.com/gomaja/go-sctp v0.0.0-20260801143753-f130f9832d2f/go.mod h1:xBckQOVp88sgf5+VXthsPEtTQiCdNy8RTuAV1RG9LBo=
+github.com/gomaja/go-sctp v1.0.0 h1:OoYufJ2X2POUjs2ZDfI+ooY3o9FB7v5iG6zNaHVProg=
+github.com/gomaja/go-sctp v1.0.0/go.mod h1:xBckQOVp88sgf5+VXthsPEtTQiCdNy8RTuAV1RG9LBo=
 github.com/google/go-cmp v0.7.0 h1:wk8382ETsv4JYUZwIsn6YpYiWiBsYLSJiTsyBybVuN8=
 github.com/google/go-cmp v0.7.0/go.mod h1:pXiqmnSA92OHEEa9HXL2W4E7lf9JzCmGVUdgjX3N/iU=
 github.com/pascaldekloe/goe v0.1.1 h1:Ah6WQ56rZONR3RW3qWa2NCZ6JAVvSpUcoLBaOmYFt9Q=
