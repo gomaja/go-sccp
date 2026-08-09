@@ -1107,27 +1107,33 @@ func (c *Credit) read(b []byte) (int, error) {
 }
 
 func (c *Credit) readOptional(b []byte) (int, error) {
-	const valueLen = 1
-	if len(b) < 2 {
+	const (
+		headerLen   = 2
+		valueLen    = 1
+		valueOffset = headerLen
+		wireLen     = headerLen + valueLen
+	)
+	if len(b) < headerLen {
 		return 0, io.ErrUnexpectedEOF
 	}
 
-	c.code = ParameterNameCode(b[0])
-	if c.code != PCodeCredit {
+	code := ParameterNameCode(b[0])
+	if code != PCodeCredit {
 		return 0, UnsupportedParameterError(b[0])
 	}
 
-	c.length = int(b[1])
-	if c.length != valueLen {
-		return 2, fmt.Errorf("%s: invalid length: expected %d, got %d", PCodeCredit, valueLen, c.length)
+	length := int(b[1])
+	if length != valueLen {
+		return headerLen, fmt.Errorf("%s: invalid length: expected %d, got %d", PCodeCredit, valueLen, length)
 	}
-	n := 2 + c.length
-	if len(b) < n {
-		return 2, io.ErrUnexpectedEOF
+	if len(b) < wireLen {
+		return headerLen, io.ErrUnexpectedEOF
 	}
 
-	c.value = b[2]
-	return n, nil
+	c.code = code
+	c.length = length
+	c.value = b[valueOffset]
+	return wireLen, nil
 }
 
 // Write serializes the Credit parameter and returns it as a byte slice.
@@ -1669,31 +1675,38 @@ func (s *Segmentation) Read(b []byte) (int, error) {
 		s.paramType = PTypeO
 	}
 
-	const valueLen = 4
-	if len(b) < 2 {
+	const (
+		headerLen   = 2
+		valueLen    = 4
+		valueOffset = headerLen
+		wireLen     = headerLen + valueLen
+	)
+	if len(b) < headerLen {
 		return 0, io.ErrUnexpectedEOF
 	}
 
-	s.code = ParameterNameCode(b[0])
-	if s.code != PCodeSegmentation {
+	code := ParameterNameCode(b[0])
+	if code != PCodeSegmentation {
 		return 0, UnsupportedParameterError(b[0])
 	}
 
-	s.length = int(b[1])
-	if s.length != valueLen {
-		return 2, fmt.Errorf("%s: invalid length: expected %d, got %d", PCodeSegmentation, valueLen, s.length)
+	length := int(b[1])
+	if length != valueLen {
+		return headerLen, fmt.Errorf("%s: invalid length: expected %d, got %d", PCodeSegmentation, valueLen, length)
 	}
-	n := 2 + s.length
-	if len(b) < n {
-		return 2, io.ErrUnexpectedEOF
+	if len(b) < wireLen {
+		return headerLen, io.ErrUnexpectedEOF
 	}
 
-	s.FirstSegment = b[2]>>7&0b1 == 1
-	s.Class = b[2] >> 6 & 0b1
-	s.RemainingSegments = b[2] & 0b1111
-	s.LocalReference = utils.Uint24To32(b[3:6])
+	value := b[valueOffset:wireLen]
+	s.code = code
+	s.length = length
+	s.FirstSegment = value[0]>>7&0b1 == 1
+	s.Class = value[0] >> 6 & 0b1
+	s.RemainingSegments = value[0] & 0b1111
+	s.LocalReference = utils.Uint24To32(value[1:4])
 
-	return n, nil
+	return wireLen, nil
 }
 
 // Write serializes the Segmentation parameter and returns it as a byte slice.
@@ -1816,26 +1829,32 @@ func (h *HopCounter) read(b []byte) (int, error) {
 }
 
 func (h *HopCounter) readOptional(b []byte) (int, error) {
-	const valueLen = 1
-	if len(b) < 2 {
+	const (
+		headerLen   = 2
+		valueLen    = 1
+		valueOffset = headerLen
+		wireLen     = headerLen + valueLen
+	)
+	if len(b) < headerLen {
 		return 0, io.ErrUnexpectedEOF
 	}
 
-	h.code = ParameterNameCode(b[0])
-	if h.code != PCodeHopCounter {
+	code := ParameterNameCode(b[0])
+	if code != PCodeHopCounter {
 		return 0, UnsupportedParameterError(b[0])
 	}
-	h.length = int(b[1])
-	if h.length != valueLen {
-		return 2, fmt.Errorf("%s: invalid length: expected %d, got %d", PCodeHopCounter, valueLen, h.length)
+	length := int(b[1])
+	if length != valueLen {
+		return headerLen, fmt.Errorf("%s: invalid length: expected %d, got %d", PCodeHopCounter, valueLen, length)
 	}
-	n := 2 + h.length
-	if len(b) < n {
-		return 2, io.ErrUnexpectedEOF
+	if len(b) < wireLen {
+		return headerLen, io.ErrUnexpectedEOF
 	}
-	h.value = b[2]
+	h.code = code
+	h.length = length
+	h.value = b[valueOffset]
 
-	return n, nil
+	return wireLen, nil
 }
 
 // Write serializes the HopCounter parameter and returns it as a byte slice.
@@ -1937,28 +1956,34 @@ func (i *Importance) Read(b []byte) (int, error) {
 		i.paramType = PTypeO
 	}
 
-	const valueLen = 1
-	if len(b) < 2 {
+	const (
+		headerLen   = 2
+		valueLen    = 1
+		valueOffset = headerLen
+		wireLen     = headerLen + valueLen
+	)
+	if len(b) < headerLen {
 		return 0, io.ErrUnexpectedEOF
 	}
 
-	i.code = ParameterNameCode(b[0])
-	if i.code != PCodeImportance {
+	code := ParameterNameCode(b[0])
+	if code != PCodeImportance {
 		return 0, UnsupportedParameterError(b[0])
 	}
 
-	i.length = int(b[1])
-	if i.length != valueLen {
-		return 2, fmt.Errorf("%s: invalid length: expected %d, got %d", PCodeImportance, valueLen, i.length)
+	length := int(b[1])
+	if length != valueLen {
+		return headerLen, fmt.Errorf("%s: invalid length: expected %d, got %d", PCodeImportance, valueLen, length)
 	}
-	n := 2 + i.length
-	if len(b) < n {
-		return 2, io.ErrUnexpectedEOF
+	if len(b) < wireLen {
+		return headerLen, io.ErrUnexpectedEOF
 	}
 
-	i.value = b[2] & 0b111
+	i.code = code
+	i.length = length
+	i.value = b[valueOffset] & 0b111
 
-	return n, nil
+	return wireLen, nil
 }
 
 // Write serializes the Importance parameter and returns it as a byte slice.
