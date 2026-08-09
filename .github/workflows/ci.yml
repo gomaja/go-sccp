@@ -37,12 +37,28 @@ jobs:
       - name: diff check
         run: |
           zero_sha="0000000000000000000000000000000000000000"
+          empty_tree="$(git hash-object -t tree /dev/null)"
+
+          check_full_tree() {
+            git diff --check "$empty_tree" HEAD
+          }
+
+          diff_from_ref() {
+            base="$1"
+            if git cat-file -e "${base}^{commit}" 2>/dev/null ||
+              git fetch --no-tags --depth=1 origin "$base" 2>/dev/null; then
+              git diff --check "${base}...HEAD"
+            else
+              check_full_tree
+            fi
+          }
+
           if [ "${{ github.event_name }}" = "pull_request" ]; then
-            git diff --check "${{ github.event.pull_request.base.sha }}...HEAD"
+            diff_from_ref "${{ github.event.pull_request.base.sha }}"
           elif [ -n "${{ github.event.before }}" ] && [ "${{ github.event.before }}" != "$zero_sha" ]; then
-            git diff --check "${{ github.event.before }}...HEAD"
+            diff_from_ref "${{ github.event.before }}"
           else
-            git diff-tree --check --root --no-commit-id -r HEAD
+            check_full_tree
           fi
 
   test-linux:
@@ -159,7 +175,7 @@ jobs:
         with:
           go-version: stable
           cache: true
-      - name: go test
+      - name: ${{ matrix.kind }}
         run: ${{ matrix.command }}
 
   vuln:
