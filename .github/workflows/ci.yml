@@ -155,12 +155,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - kind: cross-build-linux-386
+          - kind: cross-build-linux-arm64
             os: ubuntu-latest
-            command: GOOS=linux GOARCH=386 CGO_ENABLED=0 go build ./...
-          - kind: cross-build-linux-arm
+            command: GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build ./...
+          - kind: cross-build-linux-riscv64
             os: ubuntu-latest
-            command: GOOS=linux GOARCH=arm CGO_ENABLED=0 go build ./...
+            command: GOOS=linux GOARCH=riscv64 CGO_ENABLED=0 go build ./...
           - kind: unsupported-macos
             os: macos-latest
             command: go test ./... -short -count=1
