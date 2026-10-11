@@ -28,6 +28,19 @@ const (
 // (03/01) §3.4.2.2 and §5.1.
 const SCMGSubsystemNumber = 1
 
+// SCCPService is the "Affected SCCP service" of an SSC congestion level, bits
+// 6-5 of its octet: the Implementors' Guide (03/2002) for ITU-T Q.713 (03/01),
+// modifications 1 and 2 to Figure 13 and §5.2.4, so that the connectionless
+// and connection-oriented services report congestion separately.
+type SCCPService uint8
+
+// Affected SCCP services. The code 11 is reserved.
+const (
+	SCCPServiceBoth               SCCPService = 0 // connectionless and connection-oriented
+	SCCPServiceConnectionless     SCCPService = 1 // connectionless
+	SCCPServiceConnectionOriented SCCPService = 2 // connection-oriented
+)
+
 // SCMG is an SCCP management message, carried in the data of a UDT, XUDT or
 // LUDT between the SCMG subsystems, ITU-T Q.713 (03/01) clause 5, Tables 24
 // and 25.
@@ -48,6 +61,11 @@ type SCMG struct {
 	// (most congested), in bits 1-4 (§5.2.4). It is absent from the other
 	// messages and must be zero for them.
 	CongestionLevel uint8
+
+	// AffectedService is the SCCP service the congestion level of SSC
+	// applies to, in bits 6-5 of its octet; zero, both services, for the
+	// other messages.
+	AffectedService SCCPService
 }
 
 // AppendBinary appends the SCMG message to b. On error b is returned
@@ -62,12 +80,14 @@ func (s SCMG) AppendBinary(b []byte) ([]byte, error) {
 		return b, fmt.Errorf("%w: SCMG subsystem multiplicity indicator %d exceeds 2 bits", ErrInvalidMessage, s.SubsystemMultiplicityIndicator)
 	case s.Type == SCMGTypeSSC && (s.CongestionLevel < 1 || s.CongestionLevel > 8):
 		return b, fmt.Errorf("%w: SCCP congestion level %d, want 1 to 8", ErrInvalidMessage, s.CongestionLevel)
-	case s.Type != SCMGTypeSSC && s.CongestionLevel != 0:
+	case s.Type != SCMGTypeSSC && (s.CongestionLevel != 0 || s.AffectedService != SCCPServiceBoth):
 		return b, fmt.Errorf("%w: %s carries no SCCP congestion level", ErrInvalidMessage, s.Type)
+	case s.AffectedService > SCCPServiceConnectionOriented:
+		return b, fmt.Errorf("%w: affected SCCP service %d is reserved", ErrInvalidMessage, uint8(s.AffectedService))
 	}
 	b = append(b, byte(s.Type), s.AffectedSSN, byte(s.AffectedPointCode), byte(s.AffectedPointCode>>8), s.SubsystemMultiplicityIndicator)
 	if s.Type == SCMGTypeSSC {
-		b = append(b, s.CongestionLevel)
+		b = append(b, s.CongestionLevel|byte(s.AffectedService)<<4)
 	}
 	return b, nil
 }
@@ -76,8 +96,10 @@ func (s SCMG) AppendBinary(b []byte) ([]byte, error) {
 func (s SCMG) MarshalBinary() ([]byte, error) { return s.AppendBinary(nil) }
 
 // UnmarshalBinary decodes an SCMG message. Spare bits are not examined (ITU-T
-// Q.714 (05/01) §1.1.4.4) and octets after the message are ignored. On error
-// the receiver is left unchanged.
+// Q.714 (05/01) §1.1.4.4), the reserved affected SCCP service decodes as both
+// services, the default (§1.1.4.3: other values "may be reset to default
+// values"), and octets after the message are ignored. On error the receiver
+// is left unchanged.
 func (s *SCMG) UnmarshalBinary(b []byte) error {
 	if len(b) < 5 {
 		return fmt.Errorf("%w: SCMG: %w", ErrMalformedMessage, io.ErrUnexpectedEOF)
@@ -95,6 +117,9 @@ func (s *SCMG) UnmarshalBinary(b []byte) error {
 			return fmt.Errorf("%w: SSC congestion level: %w", ErrMalformedMessage, io.ErrUnexpectedEOF)
 		}
 		v.CongestionLevel = b[5] & 0x0f
+		if service := SCCPService(b[5] >> 4 & 0x03); service <= SCCPServiceConnectionOriented {
+			v.AffectedService = service
+		}
 	default:
 		return fmt.Errorf("%w: unknown SCMG format identifier %#02x", ErrMalformedMessage, b[0])
 	}
@@ -106,7 +131,7 @@ func (s *SCMG) UnmarshalBinary(b []byte) error {
 func (s SCMG) String() string {
 	str := fmt.Sprintf("%s{AffectedSSN: %d, AffectedPointCode: %d, SMI: %d", s.Type, s.AffectedSSN, s.AffectedPointCode, s.SubsystemMultiplicityIndicator)
 	if s.Type == SCMGTypeSSC {
-		str += fmt.Sprintf(", CongestionLevel: %d", s.CongestionLevel)
+		str += fmt.Sprintf(", CongestionLevel: %d, AffectedService: %s", s.CongestionLevel, s.AffectedService)
 	}
 	return str + "}"
 }
