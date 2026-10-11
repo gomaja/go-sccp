@@ -35,11 +35,11 @@ const _MsgType_name = "CRCCCREFRLSDRLCDT1DT2AKUDTUDTSEDEARSRRSCERRITXUDTXUDTSLUD
 var _MsgType_index = [...]uint8{0, 2, 4, 8, 12, 15, 18, 21, 23, 26, 30, 32, 34, 37, 40, 43, 45, 49, 54, 58, 63}
 
 func (i MsgType) String() string {
-	i -= 1
-	if i >= MsgType(len(_MsgType_index)-1) {
-		return "MsgType(" + strconv.FormatInt(int64(i+1), 10) + ")"
+	idx := int(i) - 1
+	if i < 1 || idx >= len(_MsgType_index)-1 {
+		return "MsgType(" + strconv.FormatInt(int64(i), 10) + ")"
 	}
-	return _MsgType_name[_MsgType_index[i]:_MsgType_index[i+1]]
+	return _MsgType_name[_MsgType_index[idx]:_MsgType_index[idx+1]]
 }
 func _() {
 	// An "invalid array index" compiler error signifies that the constant values have changed.
@@ -58,9 +58,9 @@ const _SCMGType_name = "SSASSPSSTSORSOGSSC"
 var _SCMGType_index = [...]uint8{0, 3, 6, 9, 12, 15, 18}
 
 func (i SCMGType) String() string {
-	i -= 1
-	if i >= SCMGType(len(_SCMGType_index)-1) {
-		return "SCMGType(" + strconv.FormatInt(int64(i+1), 10) + ")"
+	idx := int(i) - 1
+	if i < 1 || idx >= len(_SCMGType_index)-1 {
+		return "SCMGType(" + strconv.FormatInt(int64(i), 10) + ")"
 	}
-	return _SCMGType_name[_SCMGType_index[i]:_SCMGType_index[i+1]]
+	return _SCMGType_name[_SCMGType_index[idx]:_SCMGType_index[idx+1]]
 }

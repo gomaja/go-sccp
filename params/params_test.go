@@ -1,513 +1,482 @@
-// Copyright 2019-2024 go-sccp authors. All rights reserved.
+// Copyright 2019-2026 go-sccp authors. All rights reserved.
 // Use of this source code is governed by a MIT-style license that can be
 // found in the LICENSE file.
+
 package params_test
 
 import (
+	"bytes"
+	"encoding"
 	"errors"
 	"io"
 	"testing"
 
+	"github.com/google/go-cmp/cmp"
+
 	"github.com/gomaja/go-sccp/params"
-	"github.com/pascaldekloe/goe/verify"
 )
 
-type serializable interface {
-	io.ReadWriter
-	MarshalLen() int
+type contents interface {
+	encoding.BinaryMarshaler
+	AppendBinary([]byte) ([]byte, error)
 }
 
-var cases = []struct {
-	description string
-	structured  serializable
-	serialized  []byte
-	parseFunc   func([]byte) (serializable, int, error)
-}{
-	{
-		description: "EndOfOptionalParameters",
-		structured:  params.NewEndOfOptionalParameters(),
-		serialized:  []byte{0x00},
-		parseFunc: func(b []byte) (serializable, int, error) {
-			return params.ParseEndOfOptionalParameters(b)
-		},
-	}, {
-		description: "DestinationLocalReference",
-		structured:  params.NewDestinationLocalReference(0x123456),
-		serialized:  []byte{0x12, 0x34, 0x56},
-		parseFunc: func(b []byte) (serializable, int, error) {
-			return params.ParseDestinationLocalReference(b)
-		},
-	}, {
-		description: "SourceLocalReference",
-		structured:  params.NewSourceLocalReference(0x123456),
-		serialized:  []byte{0x12, 0x34, 0x56},
-		parseFunc: func(b []byte) (serializable, int, error) {
-			return params.ParseSourceLocalReference(b)
-		},
-	}, {
-		description: "CalledPartyAddress w/ GlobalTitle",
-		structured: params.NewCalledPartyAddress(
-			params.NewAddressIndicator(false, true, false, params.GTITTNPESNAI),
-			0, 6, // SPC, SSN
-			params.NewGlobalTitle(
-				params.GTITTNPESNAI,
-				params.TranslationType(0),
-				params.NPISDNTelephony,
-				params.ESBCDOdd,
-				params.NAIInternationalNumber,
-				[]byte{
-					0x21, 0x43, 0x65, 0x87, 0x09,
-				},
-			),
-		),
-		serialized: []byte{
-			0x0a, 0x12, 0x06, 0x00, 0x11, 0x04, 0x21, 0x43, 0x65, 0x87, 0x09,
-		},
-		parseFunc: func(b []byte) (serializable, int, error) {
-			return params.ParseCalledPartyAddress(b)
-		},
-	}, {
-		description: "CallingPartyAddress w/ GlobalTitle",
-		structured: params.NewCallingPartyAddress(
-			params.NewAddressIndicator(false, true, false, params.GTITTNPESNAI),
-			0, 6, // SPC, SSN
-			params.NewGlobalTitle(
-				params.GTITTNPESNAI,
-				params.TranslationType(0),
-				params.NPISDNTelephony,
-				params.ESBCDOdd,
-				params.NAIInternationalNumber,
-				[]byte{
-					0x21, 0x43, 0x65, 0x87, 0x09,
-				},
-			),
-		),
-		serialized: []byte{
-			0x0a, 0x12, 0x06, 0x00, 0x11, 0x04, 0x21, 0x43, 0x65, 0x87, 0x09,
-		},
-		parseFunc: func(b []byte) (serializable, int, error) {
-			return params.ParseCallingPartyAddress(b)
-		},
-	}, {
-		description: "CalledPartyAddress/2-bytes",
-		structured: params.NewCalledPartyAddress(
-			params.NewAddressIndicator(false, true, true, params.GTINoGT),
-			0, 6, nil, // SPC, SSN, GT
-		),
-		serialized: []byte{
-			0x02, 0x42, 0x06,
-		},
-		parseFunc: func(b []byte) (serializable, int, error) {
-			return params.ParseCalledPartyAddress(b)
-		},
-	}, {
-		description: "CalledPartyAddress/Optional/2-bytes",
-		structured: params.NewCalledPartyAddressOptional(
-			params.NewAddressIndicator(false, true, true, params.GTINoGT),
-			0, 6, nil, // SPC, SSN, GT
-		),
-		serialized: []byte{
-			0x03, 0x02, 0x42, 0x06,
-		},
-		parseFunc: func(b []byte) (serializable, int, error) {
-			return params.ParseCalledPartyAddressOptional(b)
-		},
-	}, {
-		description: "ProtocolClass/Class 1, no ReturnOnError",
-		structured:  params.NewProtocolClass(1, false),
-		serialized:  []byte{0x01},
-		parseFunc: func(b []byte) (serializable, int, error) {
-			return params.ParseProtocolClass(b)
-		},
-	}, {
-		description: "ProtocolClass/Class 4, ReturnOnError",
-		structured:  params.NewProtocolClass(4, true),
-		serialized:  []byte{0x84},
-		parseFunc: func(b []byte) (serializable, int, error) {
-			return params.ParseProtocolClass(b)
-		},
-	}, {
-		description: "SegmentingReassembling/More data",
-		structured:  params.NewSegmentingReassembling(true),
-		serialized:  []byte{0x01},
-		parseFunc: func(b []byte) (serializable, int, error) {
-			return params.ParseSegmentingReassembling(b)
-		},
-	}, {
-		description: "SegmentingReassembling/No more data",
-		structured:  params.NewSegmentingReassembling(false),
-		serialized:  []byte{0x00},
-		parseFunc: func(b []byte) (serializable, int, error) {
-			return params.ParseSegmentingReassembling(b)
-		},
-	}, {
-		description: "ReceiveSequenceNumber",
-		structured:  params.NewReceiveSequenceNumber(0x76),
-		serialized:  []byte{0x76},
-		parseFunc: func(b []byte) (serializable, int, error) {
-			return params.ParseReceiveSequenceNumber(b)
-		},
-	}, {
-		description: "SequencingSegmenting/More data",
-		structured:  params.NewSequencingSegmenting(0x76, 0x78, true),
-		serialized:  []byte{0x76, 0x79},
-		parseFunc: func(b []byte) (serializable, int, error) {
-			return params.ParseSequencingSegmenting(b)
-		},
-	}, {
-		description: "SequencingSegmenting/No more data",
-		structured:  params.NewSequencingSegmenting(0x76, 0x78, false),
-		serialized:  []byte{0x76, 0x78},
-		parseFunc: func(b []byte) (serializable, int, error) {
-			return params.ParseSequencingSegmenting(b)
-		},
-	}, {
-		description: "SequencingSegmenting/Sequence 127",
-		structured:  params.NewSequencingSegmenting(0xfe, 0xfe, false),
-		serialized:  []byte{0xfe, 0xfe},
-		parseFunc: func(b []byte) (serializable, int, error) {
-			return params.ParseSequencingSegmenting(b)
-		},
-	}, {
-		description: "Credit/Fixed",
-		structured:  params.NewCredit(0x77),
-		serialized:  []byte{0x77},
-		parseFunc: func(b []byte) (serializable, int, error) {
-			return params.ParseCredit(b)
-		},
-	}, {
-		description: "Credit/Optional",
-		structured:  params.NewCreditOptional(0x77),
-		serialized:  []byte{0x09, 0x01, 0x77},
-		parseFunc: func(b []byte) (serializable, int, error) {
-			return params.ParseCreditOptional(b)
-		},
-	}, {
-		description: "ReleaseCause/Generics",
-		structured:  params.NewCause(params.ReleaseCauseSCCPUserOriginated),
-		serialized:  []byte{0x03},
-		parseFunc: func(b []byte) (serializable, int, error) {
-			return params.ParseReleaseCause(b)
-		},
-	}, {
-		description: "ReturnCause",
-		structured:  params.NewCause(params.ReturnCauseSubsystemFailure),
-		serialized:  []byte{0x03},
-		parseFunc: func(b []byte) (serializable, int, error) {
-			return params.ParseReturnCause(b)
-		},
-	}, {
-		description: "ResetCause",
-		structured:  params.NewCause(params.ResetCauseMessageOutOfOrderIncorrectReceiveSequenceNumber),
-		serialized:  []byte{0x03},
-		parseFunc: func(b []byte) (serializable, int, error) {
-			return params.ParseResetCause(b)
-		},
-	}, {
-		description: "ErrorCause",
-		structured:  params.NewCause(params.ErrorCauseServiceClassMismatch),
-		serialized:  []byte{0x03},
-		parseFunc: func(b []byte) (serializable, int, error) {
-			return params.ParseErrorCause(b)
-		},
-	}, {
-		description: "RefusalCause",
-		structured:  params.NewCause(params.RefusalCauseSCCPUserOriginated),
-		serialized:  []byte{0x03},
-		parseFunc: func(b []byte) (serializable, int, error) {
-			return params.ParseRefusalCause(b)
-		},
-	}, {
-		description: "Data/Variable",
-		structured:  params.NewData([]byte{0xde, 0xad, 0xbe, 0xef}),
-		serialized:  []byte{0x04, 0xde, 0xad, 0xbe, 0xef},
-		parseFunc: func(b []byte) (serializable, int, error) {
-			return params.ParseData(b)
-		},
-	}, {
-		description: "Data/Optional",
-		structured:  params.NewDataOptional([]byte{0xde, 0xad, 0xbe, 0xef}),
-		serialized:  []byte{0x0f, 0x04, 0xde, 0xad, 0xbe, 0xef},
-		parseFunc: func(b []byte) (serializable, int, error) {
-			return params.ParseDataOptional(b)
-		},
-	}, {
-		description: "Segmentation",
-		structured:  params.NewSegmentation(true, 1, 2, 0x123456),
-		serialized:  []byte{0x10, 0x04, 0xc2, 0x12, 0x34, 0x56},
-		parseFunc: func(b []byte) (serializable, int, error) {
-			return params.ParseSegmentation(b)
-		},
-	}, {
-		description: "HopCounter/Fixed",
-		structured:  params.NewHopCounter(0x03),
-		serialized:  []byte{0x03},
-		parseFunc: func(b []byte) (serializable, int, error) {
-			return params.ParseHopCounter(b)
-		},
-	}, {
-		description: "HopCounter/Optional",
-		structured:  params.NewHopCounterOptional(0x03),
-		serialized:  []byte{0x11, 0x01, 0x03},
-		parseFunc: func(b []byte) (serializable, int, error) {
-			return params.ParseHopCounterOptional(b)
-		},
-	}, {
-		description: "Importance",
-		structured:  params.NewImportance(0x07),
-		serialized:  []byte{0x12, 0x01, 0x07},
-		parseFunc: func(b []byte) (serializable, int, error) {
-			return params.ParseImportance(b)
-		},
-	}, {
-		description: "LongData/512 bytes",
-		structured:  params.NewLongData([]byte{0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f, 0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2a, 0x2b, 0x2c, 0x2d, 0x2e, 0x2f, 0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x3a, 0x3b, 0x3c, 0x3d, 0x3e, 0x3f, 0x40, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48, 0x49, 0x4a, 0x4b, 0x4c, 0x4d, 0x4e, 0x4f, 0x50, 0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58, 0x59, 0x5a, 0x5b, 0x5c, 0x5d, 0x5e, 0x5f, 0x60, 0x61, 0x62, 0x63, 0x64, 0x65, 0x66, 0x67, 0x68, 0x69, 0x6a, 0x6b, 0x6c, 0x6d, 0x6e, 0x6f, 0x70, 0x71, 0x72, 0x73, 0x74, 0x75, 0x76, 0x77, 0x78, 0x79, 0x7a, 0x7b, 0x7c, 0x7d, 0x7e, 0x7f, 0x80, 0x81, 0x82, 0x83, 0x84, 0x85, 0x86, 0x87, 0x88, 0x89, 0x8a, 0x8b, 0x8c, 0x8d, 0x8e, 0x8f, 0x90, 0x91, 0x92, 0x93, 0x94, 0x95, 0x96, 0x97, 0x98, 0x99, 0x9a, 0x9b, 0x9c, 0x9d, 0x9e, 0x9f, 0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7, 0xa8, 0xa9, 0xaa, 0xab, 0xac, 0xad, 0xae, 0xaf, 0xb0, 0xb1, 0xb2, 0xb3, 0xb4, 0xb5, 0xb6, 0xb7, 0xb8, 0xb9, 0xba, 0xbb, 0xbc, 0xbd, 0xbe, 0xbf, 0xc0, 0xc1, 0xc2, 0xc3, 0xc4, 0xc5, 0xc6, 0xc7, 0xc8, 0xc9, 0xca, 0xcb, 0xcc, 0xcd, 0xce, 0xcf, 0xd0, 0xd1, 0xd2, 0xd3, 0xd4, 0xd5, 0xd6, 0xd7, 0xd8, 0xd9, 0xda, 0xdb, 0xdc, 0xdd, 0xde, 0xdf, 0xe0, 0xe1, 0xe2, 0xe3, 0xe4, 0xe5, 0xe6, 0xe7, 0xe8, 0xe9, 0xea, 0xeb, 0xec, 0xed, 0xee, 0xef, 0xf0, 0xf1, 0xf2, 0xf3, 0xf4, 0xf5, 0xf6, 0xf7, 0xf8, 0xf9, 0xfa, 0xfb, 0xfc, 0xfd, 0xfe, 0xff, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f, 0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2a, 0x2b, 0x2c, 0x2d, 0x2e, 0x2f, 0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x3a, 0x3b, 0x3c, 0x3d, 0x3e, 0x3f, 0x40, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48, 0x49, 0x4a, 0x4b, 0x4c, 0x4d, 0x4e, 0x4f, 0x50, 0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58, 0x59, 0x5a, 0x5b, 0x5c, 0x5d, 0x5e, 0x5f, 0x60, 0x61, 0x62, 0x63, 0x64, 0x65, 0x66, 0x67, 0x68, 0x69, 0x6a, 0x6b, 0x6c, 0x6d, 0x6e, 0x6f, 0x70, 0x71, 0x72, 0x73, 0x74, 0x75, 0x76, 0x77, 0x78, 0x79, 0x7a, 0x7b, 0x7c, 0x7d, 0x7e, 0x7f, 0x80, 0x81, 0x82, 0x83, 0x84, 0x85, 0x86, 0x87, 0x88, 0x89, 0x8a, 0x8b, 0x8c, 0x8d, 0x8e, 0x8f, 0x90, 0x91, 0x92, 0x93, 0x94, 0x95, 0x96, 0x97, 0x98, 0x99, 0x9a, 0x9b, 0x9c, 0x9d, 0x9e, 0x9f, 0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7, 0xa8, 0xa9, 0xaa, 0xab, 0xac, 0xad, 0xae, 0xaf, 0xb0, 0xb1, 0xb2, 0xb3, 0xb4, 0xb5, 0xb6, 0xb7, 0xb8, 0xb9, 0xba, 0xbb, 0xbc, 0xbd, 0xbe, 0xbf, 0xc0, 0xc1, 0xc2, 0xc3, 0xc4, 0xc5, 0xc6, 0xc7, 0xc8, 0xc9, 0xca, 0xcb, 0xcc, 0xcd, 0xce, 0xcf, 0xd0, 0xd1, 0xd2, 0xd3, 0xd4, 0xd5, 0xd6, 0xd7, 0xd8, 0xd9, 0xda, 0xdb, 0xdc, 0xdd, 0xde, 0xdf, 0xe0, 0xe1, 0xe2, 0xe3, 0xe4, 0xe5, 0xe6, 0xe7, 0xe8, 0xe9, 0xea, 0xeb, 0xec, 0xed, 0xee, 0xef, 0xf0, 0xf1, 0xf2, 0xf3, 0xf4, 0xf5, 0xf6, 0xf7, 0xf8, 0xf9, 0xfa, 0xfb, 0xfc, 0xfd, 0xfe, 0xff}),
-		serialized:  []byte{0x02, 0x00, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f, 0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2a, 0x2b, 0x2c, 0x2d, 0x2e, 0x2f, 0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x3a, 0x3b, 0x3c, 0x3d, 0x3e, 0x3f, 0x40, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48, 0x49, 0x4a, 0x4b, 0x4c, 0x4d, 0x4e, 0x4f, 0x50, 0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58, 0x59, 0x5a, 0x5b, 0x5c, 0x5d, 0x5e, 0x5f, 0x60, 0x61, 0x62, 0x63, 0x64, 0x65, 0x66, 0x67, 0x68, 0x69, 0x6a, 0x6b, 0x6c, 0x6d, 0x6e, 0x6f, 0x70, 0x71, 0x72, 0x73, 0x74, 0x75, 0x76, 0x77, 0x78, 0x79, 0x7a, 0x7b, 0x7c, 0x7d, 0x7e, 0x7f, 0x80, 0x81, 0x82, 0x83, 0x84, 0x85, 0x86, 0x87, 0x88, 0x89, 0x8a, 0x8b, 0x8c, 0x8d, 0x8e, 0x8f, 0x90, 0x91, 0x92, 0x93, 0x94, 0x95, 0x96, 0x97, 0x98, 0x99, 0x9a, 0x9b, 0x9c, 0x9d, 0x9e, 0x9f, 0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7, 0xa8, 0xa9, 0xaa, 0xab, 0xac, 0xad, 0xae, 0xaf, 0xb0, 0xb1, 0xb2, 0xb3, 0xb4, 0xb5, 0xb6, 0xb7, 0xb8, 0xb9, 0xba, 0xbb, 0xbc, 0xbd, 0xbe, 0xbf, 0xc0, 0xc1, 0xc2, 0xc3, 0xc4, 0xc5, 0xc6, 0xc7, 0xc8, 0xc9, 0xca, 0xcb, 0xcc, 0xcd, 0xce, 0xcf, 0xd0, 0xd1, 0xd2, 0xd3, 0xd4, 0xd5, 0xd6, 0xd7, 0xd8, 0xd9, 0xda, 0xdb, 0xdc, 0xdd, 0xde, 0xdf, 0xe0, 0xe1, 0xe2, 0xe3, 0xe4, 0xe5, 0xe6, 0xe7, 0xe8, 0xe9, 0xea, 0xeb, 0xec, 0xed, 0xee, 0xef, 0xf0, 0xf1, 0xf2, 0xf3, 0xf4, 0xf5, 0xf6, 0xf7, 0xf8, 0xf9, 0xfa, 0xfb, 0xfc, 0xfd, 0xfe, 0xff, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f, 0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2a, 0x2b, 0x2c, 0x2d, 0x2e, 0x2f, 0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x3a, 0x3b, 0x3c, 0x3d, 0x3e, 0x3f, 0x40, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48, 0x49, 0x4a, 0x4b, 0x4c, 0x4d, 0x4e, 0x4f, 0x50, 0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58, 0x59, 0x5a, 0x5b, 0x5c, 0x5d, 0x5e, 0x5f, 0x60, 0x61, 0x62, 0x63, 0x64, 0x65, 0x66, 0x67, 0x68, 0x69, 0x6a, 0x6b, 0x6c, 0x6d, 0x6e, 0x6f, 0x70, 0x71, 0x72, 0x73, 0x74, 0x75, 0x76, 0x77, 0x78, 0x79, 0x7a, 0x7b, 0x7c, 0x7d, 0x7e, 0x7f, 0x80, 0x81, 0x82, 0x83, 0x84, 0x85, 0x86, 0x87, 0x88, 0x89, 0x8a, 0x8b, 0x8c, 0x8d, 0x8e, 0x8f, 0x90, 0x91, 0x92, 0x93, 0x94, 0x95, 0x96, 0x97, 0x98, 0x99, 0x9a, 0x9b, 0x9c, 0x9d, 0x9e, 0x9f, 0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7, 0xa8, 0xa9, 0xaa, 0xab, 0xac, 0xad, 0xae, 0xaf, 0xb0, 0xb1, 0xb2, 0xb3, 0xb4, 0xb5, 0xb6, 0xb7, 0xb8, 0xb9, 0xba, 0xbb, 0xbc, 0xbd, 0xbe, 0xbf, 0xc0, 0xc1, 0xc2, 0xc3, 0xc4, 0xc5, 0xc6, 0xc7, 0xc8, 0xc9, 0xca, 0xcb, 0xcc, 0xcd, 0xce, 0xcf, 0xd0, 0xd1, 0xd2, 0xd3, 0xd4, 0xd5, 0xd6, 0xd7, 0xd8, 0xd9, 0xda, 0xdb, 0xdc, 0xdd, 0xde, 0xdf, 0xe0, 0xe1, 0xe2, 0xe3, 0xe4, 0xe5, 0xe6, 0xe7, 0xe8, 0xe9, 0xea, 0xeb, 0xec, 0xed, 0xee, 0xef, 0xf0, 0xf1, 0xf2, 0xf3, 0xf4, 0xf5, 0xf6, 0xf7, 0xf8, 0xf9, 0xfa, 0xfb, 0xfc, 0xfd, 0xfe, 0xff},
-		parseFunc: func(b []byte) (serializable, int, error) {
-			return params.ParseLongData(b)
-		},
-	},
+type decodable interface {
+	encoding.BinaryUnmarshaler
 }
 
-func TestParams(t *testing.T) {
-	t.Helper()
-
-	for _, c := range cases {
-		t.Run(c.description, func(t *testing.T) {
-			t.Run("Decode", func(t *testing.T) {
-				prm, _, err := c.parseFunc(c.serialized)
-				if err != nil {
-					t.Fatal(err)
-				}
-
-				if got, want := prm, c.structured; !verify.Values(t, "", got, want) {
-					t.Errorf("got: %v, want: %v", got, want)
-				}
-			})
-
-			t.Run("Serialize", func(t *testing.T) {
-				b := make([]byte, len(c.serialized))
-				if _, err := c.structured.Write(b); err != nil {
-					t.Fatal(err)
-				}
-
-				if got, want := b, c.serialized; !verify.Values(t, "", got, want) {
-					t.Errorf("got: %v, want: %v", got, want)
-				}
-			})
-		})
+func mustGT(t *testing.T) func(*params.GlobalTitle, error) *params.GlobalTitle {
+	return func(gt *params.GlobalTitle, err error) *params.GlobalTitle {
+		t.Helper()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return gt
 	}
 }
 
-func TestParamsReportWireLengths(t *testing.T) {
-	for _, c := range cases {
-		t.Run(c.description, func(t *testing.T) {
-			_, n, err := c.parseFunc(c.serialized)
+// TestVectors checks each parameter against its ITU-T Q.713 (03/01) clause 3
+// encoding, in both directions.
+func TestVectors(t *testing.T) {
+	gt := mustGT(t)
+	tests := []struct {
+		name    string
+		value   contents
+		decoded func() decodable
+		wire    []byte
+	}{
+		{"protocol class 0", params.ProtocolClass{Class: 0}, func() decodable { return new(params.ProtocolClass) }, []byte{0x00}},
+		{"protocol class 1 with return on error", params.ProtocolClass{Class: 1, ReturnOnError: true}, func() decodable { return new(params.ProtocolClass) }, []byte{0x81}},
+		{"protocol class 3", params.ProtocolClass{Class: 3}, func() decodable { return new(params.ProtocolClass) }, []byte{0x03}},
+		// §3.2/§3.3: least significant octet first.
+		{"local reference", params.LocalReference(0x030201), func() decodable { return new(params.LocalReference) }, []byte{0x01, 0x02, 0x03}},
+		{"credit", params.Credit(127), func() decodable { return new(params.Credit) }, []byte{0x7f}},
+		{"hop counter", params.HopCounter(15), func() decodable { return new(params.HopCounter) }, []byte{0x0f}},
+		{"importance", params.Importance(7), func() decodable { return new(params.Importance) }, []byte{0x07}},
+		// §3.9: P(S) and P(R) in bits 8-2, M in bit 1 of octet 2.
+		{"sequencing/segmenting", params.SequencingSegmenting{SendSequenceNumber: 127, ReceiveSequenceNumber: 1, MoreData: true}, func() decodable { return new(params.SequencingSegmenting) }, []byte{0xfe, 0x03}},
+		{"sequencing/segmenting P(R) 127", params.SequencingSegmenting{ReceiveSequenceNumber: 127}, func() decodable { return new(params.SequencingSegmenting) }, []byte{0x00, 0xfe}},
+		{"credit 127", params.MaxCredit, func() decodable { return new(params.Credit) }, []byte{0x7f}},
+		// §3.17: F bit 8, C bit 7, remaining bits 4-1, reference LSB first.
+		{"segmentation first", params.Segmentation{FirstSegment: true, InSequenceDelivery: true, RemainingSegments: 15, LocalReference: 0x030201}, func() decodable { return new(params.Segmentation) }, []byte{0xcf, 0x01, 0x02, 0x03}},
+		{"segmentation last", params.Segmentation{RemainingSegments: 0, LocalReference: 0xffffff}, func() decodable { return new(params.Segmentation) }, []byte{0x00, 0xff, 0xff, 0xff}},
+		// §3.4: SSN-only, route on SSN.
+		{"address SSN", params.NewSSNAddress(6), func() decodable { return new(params.PartyAddress) }, []byte{0x42, 0x06}},
+		// §3.4.2.1: point code LSB first, bits 7-8 of octet 2 zero.
+		{"address PC SSN", params.NewPointCodeAddress(0x3fff, 8), func() decodable { return new(params.PartyAddress) }, []byte{0x43, 0xff, 0x3f, 0x08}},
+		// §3.5: calling address that is only an address indicator.
+		{"address indicator only", params.PartyAddress{}, func() decodable { return new(params.PartyAddress) }, []byte{0x00}},
+		{"address national use", params.PartyAddress{NationalUse: true, RouteOnSSN: true, HasSSN: true, SSN: 1}, func() decodable { return new(params.PartyAddress) }, []byte{0xc2, 0x01}},
+		// §3.4.2.3.4: GTI 4, TT 0, NP E.164, ES BCD odd, NAI international,
+		// nine digits with filler 0000.
+		{"address GTI 4", params.NewGlobalTitleAddress(gt(params.NewGlobalTitle4(0, params.NPISDNTelephony, params.NAIInternationalNumber, "123456789")), 6), func() decodable { return new(params.PartyAddress) },
+			[]byte{0x12, 0x06, 0x00, 0x11, 0x04, 0x21, 0x43, 0x65, 0x87, 0x09}},
+		// §3.4.2.3.1: GTI 1, odd/even in bit 8 of the NAI octet.
+		{"address GTI 1 odd", params.PartyAddress{GlobalTitle: gt(params.NewGlobalTitle1(params.NAIInternationalNumber, "123"))}, func() decodable { return new(params.PartyAddress) },
+			[]byte{0x04, 0x84, 0x21, 0x03}},
+		{"address GTI 1 even", params.PartyAddress{GlobalTitle: gt(params.NewGlobalTitle1(params.NAIInternationalNumber, "1234"))}, func() decodable { return new(params.PartyAddress) },
+			[]byte{0x04, 0x04, 0x21, 0x43}},
+		// A global title of its header only.
+		{"address GTI 2 without address information", params.PartyAddress{HasSSN: true, SSN: 7, GlobalTitle: &params.GlobalTitle{Indicator: params.GTITTOnly, TranslationType: 9}}, func() decodable { return new(params.PartyAddress) },
+			[]byte{0x0a, 0x07, 0x09}},
+		// §3.4.2.3.2: GTI 2, translation type then address.
+		{"address GTI 2", params.PartyAddress{HasSSN: true, SSN: 7, GlobalTitle: &params.GlobalTitle{Indicator: params.GTITTOnly, TranslationType: 9, AddressInformation: []byte{0x21}}}, func() decodable { return new(params.PartyAddress) },
+			[]byte{0x0a, 0x07, 0x09, 0x21}},
+		// §3.4.2.3.3: GTI 3, ES BCD even.
+		{"address GTI 3 even", params.PartyAddress{GlobalTitle: gt(params.NewGlobalTitle3(0, params.NPISDNMobile, "1234"))}, func() decodable { return new(params.PartyAddress) },
+			[]byte{0x0c, 0x00, 0x72, 0x21, 0x43}},
+		// Spare GTI 8: no defined format, contents carried as they are.
+		{"address spare GTI", params.PartyAddress{GlobalTitle: &params.GlobalTitle{Indicator: 8, AddressInformation: []byte{0xaa, 0xbb}}}, func() decodable { return new(params.PartyAddress) },
+			[]byte{0x20, 0xaa, 0xbb}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := tt.value.MarshalBinary()
 			if err != nil {
-				t.Fatal(err)
+				t.Fatalf("MarshalBinary: %v", err)
 			}
-			if got, want := n, len(c.serialized); got != want {
-				t.Fatalf("parse consumed %d bytes, want %d", got, want)
+			if !bytes.Equal(got, tt.wire) {
+				t.Fatalf("MarshalBinary = % x, want % x", got, tt.wire)
 			}
-
-			b := make([]byte, len(c.serialized))
-			n, err = c.structured.Write(b)
-			if err != nil {
-				t.Fatal(err)
+			appended, err := tt.value.AppendBinary([]byte{0xee})
+			if err != nil || !bytes.Equal(appended, append([]byte{0xee}, tt.wire...)) {
+				t.Fatalf("AppendBinary = % x, %v", appended, err)
 			}
-			if got, want := n, len(c.serialized); got != want {
-				t.Fatalf("write reported %d bytes, want %d", got, want)
+			d := tt.decoded()
+			if err := d.UnmarshalBinary(tt.wire); err != nil {
+				t.Fatalf("UnmarshalBinary: %v", err)
 			}
-			if got, want := c.structured.MarshalLen(), len(c.serialized); got != want {
-				t.Fatalf("marshal length %d, want %d", got, want)
+			want := any(tt.value)
+			if p, ok := d.(*params.PartyAddress); ok {
+				if diff := cmp.Diff(want, *p); diff != "" {
+					t.Fatalf("decoded mismatch (-want +got):\n%s", diff)
+				}
+				return
+			}
+			if diff := cmp.Diff(want, deref(d)); diff != "" {
+				t.Fatalf("decoded mismatch (-want +got):\n%s", diff)
 			}
 		})
 	}
 }
 
-func TestParseOptionalParametersIncludesEndMarkerInConsumedLength(t *testing.T) {
-	wire := []byte{
-		0x12, 0x01, 0x02, // Importance
-		0x00,       // End of optional parameters
-		0xff, 0xff, // trailing bytes are outside the optional parameter list
+func deref(d decodable) any {
+	switch v := d.(type) {
+	case *params.ProtocolClass:
+		return *v
+	case *params.LocalReference:
+		return *v
+	case *params.Credit:
+		return *v
+	case *params.HopCounter:
+		return *v
+	case *params.Importance:
+		return *v
+	case *params.SequencingSegmenting:
+		return *v
+	case *params.Segmentation:
+		return *v
+	}
+	panic("unhandled type")
+}
+
+// TestEncodeRefusesValuesThatWouldChange checks that the encoder reports every
+// value it cannot carry instead of masking or truncating it.
+func TestEncodeRefusesValuesThatWouldChange(t *testing.T) {
+	tests := []struct {
+		name  string
+		value contents
+	}{
+		{"protocol class 4", params.ProtocolClass{Class: 4}},
+		{"return on error with class 2", params.ProtocolClass{Class: 2, ReturnOnError: true}},
+		{"return on error with class 3", params.ProtocolClass{Class: 3, ReturnOnError: true}},
+		{"local reference over 24 bits", params.LocalReference(0x1000000)},
+		{"reserved local reference", params.LocalReferenceReserved},
+		{"hop counter 0", params.HopCounter(0)},
+		{"hop counter 16", params.HopCounter(16)},
+		{"importance 8", params.Importance(8)},
+		{"send sequence number 128", params.SequencingSegmenting{SendSequenceNumber: 128}},
+		{"receive sequence number 128", params.SequencingSegmenting{ReceiveSequenceNumber: 128}},
+		{"remaining segments 16", params.Segmentation{RemainingSegments: 16}},
+		{"segmentation local reference over 24 bits", params.Segmentation{LocalReference: 0x1000000}},
+		{"point code over 14 bits", params.NewPointCodeAddress(0x4000, 1)},
+		{"point code without indicator", params.PartyAddress{PointCode: 1}},
+		{"SSN without indicator", params.PartyAddress{SSN: 1}},
+		{"GTI 0 global title", params.PartyAddress{GlobalTitle: &params.GlobalTitle{}}},
+		{"GTI 16 global title", params.PartyAddress{GlobalTitle: &params.GlobalTitle{Indicator: 16}}},
+		{"GTI 1 with translation type", params.PartyAddress{GlobalTitle: &params.GlobalTitle{Indicator: params.GTINAIOnly, TranslationType: 1}}},
+		{"GTI 1 with numbering plan", params.PartyAddress{GlobalTitle: &params.GlobalTitle{Indicator: params.GTINAIOnly, NumberingPlan: 1}}},
+		{"GTI 2 with nature of address", params.PartyAddress{GlobalTitle: &params.GlobalTitle{Indicator: params.GTITTOnly, NatureOfAddress: 1}}},
+		{"GTI 2 with encoding scheme", params.PartyAddress{GlobalTitle: &params.GlobalTitle{Indicator: params.GTITTOnly, EncodingScheme: 1}}},
+		{"GTI 3 with odd digits flag", params.PartyAddress{GlobalTitle: &params.GlobalTitle{Indicator: params.GTITTNPES, OddDigits: true}}},
+		{"GTI 3 with nature of address", params.PartyAddress{GlobalTitle: &params.GlobalTitle{Indicator: params.GTITTNPES, NatureOfAddress: 4}}},
+		{"GTI 4 with odd digits flag", params.PartyAddress{GlobalTitle: &params.GlobalTitle{Indicator: params.GTITTNPESNAI, OddDigits: true}}},
+		{"GTI 4 numbering plan over 4 bits", params.PartyAddress{GlobalTitle: &params.GlobalTitle{Indicator: params.GTITTNPESNAI, NumberingPlan: 16}}},
+		{"GTI 4 encoding scheme over 4 bits", params.PartyAddress{GlobalTitle: &params.GlobalTitle{Indicator: params.GTITTNPESNAI, EncodingScheme: 16}}},
+		{"GTI 4 nature of address over 7 bits", params.PartyAddress{GlobalTitle: &params.GlobalTitle{Indicator: params.GTITTNPESNAI, NatureOfAddress: 0x80}}},
+		{"spare GTI with translation type", params.PartyAddress{GlobalTitle: &params.GlobalTitle{Indicator: 5, TranslationType: 1}}},
+		{"credit 128", params.Credit(128)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			b, err := tt.value.MarshalBinary()
+			if !errors.Is(err, params.ErrInvalidValue) {
+				t.Fatalf("MarshalBinary = % x, %v; want ErrInvalidValue", b, err)
+			}
+			prefix := []byte{0xee}
+			got, err := tt.value.AppendBinary(prefix)
+			if !errors.Is(err, params.ErrInvalidValue) || !bytes.Equal(got, prefix) {
+				t.Fatalf("AppendBinary = % x, %v; want the input unchanged and ErrInvalidValue", got, err)
+			}
+		})
+	}
+}
+
+// TestDecodeIgnoresSpareBits checks ITU-T Q.714 (05/01) §1.1.4.4: spare fields
+// are not examined at the destination node.
+func TestDecodeIgnoresSpareBits(t *testing.T) {
+	// For classes 0 and 1, bits 5-8 are a message handling code (ITU-T Q.713
+	// (03/01) §3.6): 1000 is return message on error, and the spare codes
+	// 0001 to 0111 and 1001 to 1111 are reset to the default, no special
+	// options (ITU-T Q.714 (05/01) §1.1.4.3).
+	var pc params.ProtocolClass
+	for octet, want := range map[byte]params.ProtocolClass{
+		0x01: {Class: 1}, 0x71: {Class: 1}, 0x81: {Class: 1, ReturnOnError: true},
+		0x91: {Class: 1}, 0xf1: {Class: 1}, 0x80: {Class: 0, ReturnOnError: true}, 0xf0: {Class: 0},
+	} {
+		if err := pc.UnmarshalBinary([]byte{octet}); err != nil || pc != want {
+			t.Errorf("protocol class %#02x = %+v, %v; want %+v", octet, pc, err, want)
+		}
+	}
+	// Bits 5-8 are spare for classes 2 and 3, so bit 8 is not return on error.
+	if err := pc.UnmarshalBinary([]byte{0x82}); err != nil || pc != (params.ProtocolClass{Class: 2}) {
+		t.Errorf("protocol class 0x82 = %+v, %v", pc, err)
+	}
+	// Undefined classes are returned for the procedures to reject.
+	if err := pc.UnmarshalBinary([]byte{0x0e}); err != nil || pc.Class != 14 {
+		t.Errorf("protocol class 0x0e = %+v, %v", pc, err)
 	}
 
-	got, n, err := params.ParseOptionalParameters(wire)
+	var imp params.Importance
+	if err := imp.UnmarshalBinary([]byte{0xfd}); err != nil || imp != 5 {
+		t.Errorf("importance 0xfd = %d, %v; bits 4-8 are spare", imp, err)
+	}
+	var seq params.SequencingSegmenting
+	if err := seq.UnmarshalBinary([]byte{0x05, 0x04}); err != nil || seq != (params.SequencingSegmenting{SendSequenceNumber: 2, ReceiveSequenceNumber: 2}) {
+		t.Errorf("sequencing/segmenting 05 04 = %+v, %v; bit 1 of octet 1 is spare", seq, err)
+	}
+	var seg params.Segmentation
+	if err := seg.UnmarshalBinary([]byte{0x31, 0x00, 0x00, 0x00}); err != nil || seg != (params.Segmentation{RemainingSegments: 1}) {
+		t.Errorf("segmentation 31 = %+v, %v; bits 6-5 are spare", seg, err)
+	}
+	var addr params.PartyAddress
+	if err := addr.UnmarshalBinary([]byte{0x41, 0xff, 0xff}); err != nil || addr.PointCode != 0x3fff {
+		t.Errorf("point code ff ff = %+v, %v; bits 7-8 of octet 2 are spare", addr, err)
+	}
+	// GTI 4: bit 8 of the nature of address octet is spare.
+	if err := addr.UnmarshalBinary([]byte{0x10, 0x00, 0x12, 0x84, 0x21}); err != nil || addr.GlobalTitle.NatureOfAddress != params.NAIInternationalNumber {
+		t.Errorf("GTI 4 NAI 0x84 = %+v, %v", addr.GlobalTitle, err)
+	}
+}
+
+// TestFailedDecodeKeepsReceiver checks that a decode error leaves the value as
+// it was, and that truncation matches both ErrMalformed and io.ErrUnexpectedEOF.
+func TestFailedDecodeKeepsReceiver(t *testing.T) {
+	a := params.NewPointCodeAddress(0x1234, 6)
+	before := a
+	err := a.UnmarshalBinary([]byte{0x43, 0x01})
+	if !errors.Is(err, params.ErrMalformed) || !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("truncated address: %v", err)
+	}
+	if diff := cmp.Diff(before, a); diff != "" {
+		t.Fatalf("failed decode changed the address:\n%s", diff)
+	}
+	var c params.Credit
+	if err := c.UnmarshalBinary(nil); !errors.Is(err, params.ErrMalformed) || !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("empty credit: %v", err)
+	}
+	if err := (params.RawParameter{Code: params.PCodeReserved}).Validate(); !errors.Is(err, params.ErrInvalidValue) {
+		t.Fatalf("reserved parameter name: %v", err)
+	}
+}
+
+func TestDecodeRejectsTruncatedContents(t *testing.T) {
+	tests := []struct {
+		name string
+		dec  decodable
+		wire []byte
+	}{
+		{"protocol class", new(params.ProtocolClass), nil},
+		{"local reference", new(params.LocalReference), []byte{1, 2}},
+		{"sequencing/segmenting", new(params.SequencingSegmenting), []byte{1}},
+		{"segmentation", new(params.Segmentation), []byte{0x80, 1, 2}},
+		{"empty address", new(params.PartyAddress), nil},
+		{"address short point code", new(params.PartyAddress), []byte{0x01, 0x01}},
+		{"address missing SSN", new(params.PartyAddress), []byte{0x03, 0x01, 0x00}},
+		{"address GTI 4 short header", new(params.PartyAddress), []byte{0x10, 0x00, 0x11}},
+		{"address GTI 1 missing header", new(params.PartyAddress), []byte{0x04}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := tt.dec.UnmarshalBinary(tt.wire); !errors.Is(err, io.ErrUnexpectedEOF) {
+				t.Fatalf("UnmarshalBinary(% x) = %v, want io.ErrUnexpectedEOF", tt.wire, err)
+			}
+		})
+	}
+}
+
+func TestDecodeRejectsWrongFixedLength(t *testing.T) {
+	for _, d := range []decodable{new(params.ProtocolClass), new(params.Importance), new(params.HopCounter), new(params.Credit)} {
+		if err := d.UnmarshalBinary([]byte{1, 2}); !errors.Is(err, params.ErrMalformed) {
+			t.Errorf("%T.UnmarshalBinary(2 octets) = %v, want ErrMalformed", d, err)
+		}
+	}
+	for _, d := range []decodable{new(params.LocalReference), new(params.Segmentation), new(params.SequencingSegmenting)} {
+		if err := d.UnmarshalBinary(make([]byte, 5)); !errors.Is(err, params.ErrMalformed) {
+			t.Errorf("%T.UnmarshalBinary(5 octets) = %v, want ErrMalformed", d, err)
+		}
+	}
+}
+
+// TestDecodedValuesDoNotAliasInput checks that decoded byte slices survive the
+// caller reusing its receive buffer.
+func TestDecodedValuesDoNotAliasInput(t *testing.T) {
+	wire := []byte{0x12, 0x06, 0x00, 0x12, 0x04, 0x21, 0x43}
+	var addr params.PartyAddress
+	if err := addr.UnmarshalBinary(wire); err != nil {
+		t.Fatal(err)
+	}
+	for i := range wire {
+		wire[i] = 0xff
+	}
+	if !bytes.Equal(addr.GlobalTitle.AddressInformation, []byte{0x21, 0x43}) {
+		t.Fatalf("address information changed with the input buffer: % x", addr.GlobalTitle.AddressInformation)
+	}
+}
+
+func TestBCD(t *testing.T) {
+	tests := []struct {
+		digits string
+		wire   []byte
+		odd    bool
+	}{
+		{"", []byte{}, false},
+		{"1", []byte{0x01}, true},
+		{"12", []byte{0x21}, false},
+		// §3.4.2.3.1: an odd count ends with the filler code 0000.
+		{"123", []byte{0x21, 0x03}, true},
+		{"4479000000", []byte{0x44, 0x97, 0x00, 0x00, 0x00}, false},
+		// Figure 8/Q.713: code 11, code 12 and ST.
+		{"9BCF", []byte{0xb9, 0xfc}, false},
+	}
+	for _, tt := range tests {
+		got, odd, err := params.EncodeBCD(tt.digits)
+		if err != nil || !bytes.Equal(got, tt.wire) || odd != tt.odd {
+			t.Errorf("EncodeBCD(%q) = % x, %t, %v; want % x, %t", tt.digits, got, odd, err, tt.wire, tt.odd)
+		}
+		back, err := params.DecodeBCD(tt.wire, tt.odd)
+		if err != nil || back != tt.digits {
+			t.Errorf("DecodeBCD(% x, %t) = %q, %v; want %q", tt.wire, tt.odd, back, err, tt.digits)
+		}
+	}
+	if _, _, err := params.EncodeBCD("12a"); !errors.Is(err, params.ErrInvalidValue) {
+		t.Errorf("EncodeBCD with the spare code A = %v, want ErrInvalidValue", err)
+	}
+	if _, _, err := params.EncodeBCD("1+"); !errors.Is(err, params.ErrInvalidValue) {
+		t.Errorf("EncodeBCD with + = %v, want ErrInvalidValue", err)
+	}
+	// Liberal decoding: spare codes decode, the filler is not examined.
+	if s, err := params.DecodeBCD([]byte{0xda, 0xfe}, true); err != nil || s != "ADE" {
+		t.Errorf("DecodeBCD(da fe, odd) = %q, %v; want ADE", s, err)
+	}
+	if _, err := params.DecodeBCD(nil, true); !errors.Is(err, params.ErrMalformed) {
+		t.Errorf("DecodeBCD(empty, odd) = %v, want ErrMalformed", err)
+	}
+	if s, _, err := params.EncodeBCD("b"); err != nil {
+		t.Errorf("lower case code 11: %v", err)
+	} else if s[0] != 0x0b {
+		t.Errorf("lower case code 11 = % x", s)
+	}
+}
+
+func TestGlobalTitleDigits(t *testing.T) {
+	gt, err := params.NewGlobalTitle4(0, params.NPISDNTelephony, params.NAIInternationalNumber, "4479000000")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := len(got), 2; got != want {
-		t.Fatalf("parsed %d optional parameters, want %d", got, want)
+	if gt.EncodingScheme != params.ESBCDEven {
+		t.Errorf("even digit count set encoding scheme %s", gt.EncodingScheme)
 	}
-	if got, want := n, 4; got != want {
-		t.Fatalf("consumed %d bytes, want %d", got, want)
+	if d, err := gt.Digits(); err != nil || d != "4479000000" {
+		t.Errorf("Digits = %q, %v", d, err)
 	}
-}
-
-func TestMalformedParametersReturnUnexpectedEOF(t *testing.T) {
-	tests := []struct {
-		name  string
-		parse func([]byte) (serializable, int, error)
-		wire  []byte
-	}{
-		{
-			name: "Data optional empty",
-			parse: func(b []byte) (serializable, int, error) {
-				return params.ParseDataOptional(b)
-			},
-		},
-		{
-			name: "Credit optional short",
-			parse: func(b []byte) (serializable, int, error) {
-				return params.ParseCreditOptional(b)
-			},
-			wire: []byte{0x09, 0x01},
-		},
-		{
-			name: "LongData empty",
-			parse: func(b []byte) (serializable, int, error) {
-				return params.ParseLongData(b)
-			},
-		},
-		{
-			name: "LongData one byte",
-			parse: func(b []byte) (serializable, int, error) {
-				return params.ParseLongData(b)
-			},
-			wire: []byte{0x01},
-		},
-		{
-			name: "Segmentation short",
-			parse: func(b []byte) (serializable, int, error) {
-				return params.ParseSegmentation(b)
-			},
-			wire: []byte{0x10, 0x04, 0x80, 0x01, 0x02},
-		},
-		{
-			name: "HopCounter optional short",
-			parse: func(b []byte) (serializable, int, error) {
-				return params.ParseHopCounterOptional(b)
-			},
-			wire: []byte{0x11, 0x01},
-		},
-		{
-			name: "Importance short",
-			parse: func(b []byte) (serializable, int, error) {
-				return params.ParseImportance(b)
-			},
-			wire: []byte{0x12, 0x01},
-		},
-		{
-			name: "CalledPartyAddress optional missing SSN",
-			parse: func(b []byte) (serializable, int, error) {
-				return params.ParseCalledPartyAddressOptional(b)
-			},
-			wire: []byte{0x03, 0x01, 0x32},
-		},
+	gt1, err := params.NewGlobalTitle1(params.NAINationalSignificantNumber, "12345")
+	if err != nil || !gt1.OddDigits {
+		t.Fatalf("NewGlobalTitle1 = %+v, %v", gt1, err)
 	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			defer func() {
-				if r := recover(); r != nil {
-					t.Fatalf("parse panicked: %v", r)
-				}
-			}()
-
-			_, _, err := tt.parse(tt.wire)
-			if !errors.Is(err, io.ErrUnexpectedEOF) {
-				t.Fatalf("got error %v, want %v", err, io.ErrUnexpectedEOF)
-			}
-		})
+	if d, err := gt1.Digits(); err != nil || d != "12345" {
+		t.Errorf("GTI 1 Digits = %q, %v", d, err)
 	}
-}
-
-func TestOptionalFixedParametersRejectInvalidLengths(t *testing.T) {
-	tests := []struct {
-		name  string
-		parse func([]byte) (serializable, int, error)
-		wire  []byte
-	}{
-		{
-			name: "Credit",
-			parse: func(b []byte) (serializable, int, error) {
-				return params.ParseCreditOptional(b)
-			},
-			wire: []byte{0x09, 0x02, 0x77, 0x00},
-		},
-		{
-			name: "Segmentation",
-			parse: func(b []byte) (serializable, int, error) {
-				return params.ParseSegmentation(b)
-			},
-			wire: []byte{0x10, 0x03, 0x80, 0x12, 0x34},
-		},
-		{
-			name: "HopCounter",
-			parse: func(b []byte) (serializable, int, error) {
-				return params.ParseHopCounterOptional(b)
-			},
-			wire: []byte{0x11, 0x02, 0x03, 0x00},
-		},
-		{
-			name: "Importance",
-			parse: func(b []byte) (serializable, int, error) {
-				return params.ParseImportance(b)
-			},
-			wire: []byte{0x12, 0x02, 0x07, 0x00},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			_, _, err := tt.parse(tt.wire)
-			if err == nil {
-				t.Fatal("got nil error, want invalid optional parameter length error")
-			}
-		})
-	}
-}
-
-func TestLongDataRejectsInvalidUserDataLength(t *testing.T) {
-	if _, err := params.NewLongData(nil).Write(make([]byte, 2)); err == nil {
-		t.Fatal("got nil error for empty long data, want invalid length error")
-	}
-
-	tooLong := make([]byte, 3953)
-	if _, err := params.NewLongData(tooLong).Write(make([]byte, len(tooLong)+2)); err == nil {
-		t.Fatal("got nil error for oversized long data, want invalid length error")
-	}
-
-	if _, _, err := params.ParseLongData([]byte{0x00, 0x00}); err == nil {
-		t.Fatal("got nil error for empty wire long data, want invalid length error")
-	}
-
-	wire := append([]byte{0x0f, 0x71}, tooLong...)
-	if _, _, err := params.ParseLongData(wire); err == nil {
-		t.Fatal("got nil error for oversized wire long data, want invalid length error")
-	}
-}
-
-func FuzzParameterParsersNoPanic(f *testing.F) {
-	f.Add([]byte{})
-	for _, c := range cases {
-		f.Add(c.serialized)
-	}
-
-	f.Fuzz(func(t *testing.T, b []byte) {
-		parsers := []func([]byte) (serializable, int, error){
-			func(b []byte) (serializable, int, error) { return params.ParseCreditOptional(b) },
-			func(b []byte) (serializable, int, error) { return params.ParseData(b) },
-			func(b []byte) (serializable, int, error) { return params.ParseDataOptional(b) },
-			func(b []byte) (serializable, int, error) { return params.ParseHopCounterOptional(b) },
-			func(b []byte) (serializable, int, error) { return params.ParseImportance(b) },
-			func(b []byte) (serializable, int, error) { return params.ParseLongData(b) },
-			func(b []byte) (serializable, int, error) { return params.ParseSegmentation(b) },
+	for _, gt := range []*params.GlobalTitle{
+		{Indicator: params.GTITTOnly, AddressInformation: []byte{0x21}},
+		{Indicator: params.GTITTNPESNAI, EncodingScheme: params.ESNationalSpecific, AddressInformation: []byte{0x21}},
+		{Indicator: 9, AddressInformation: []byte{0x21}},
+	} {
+		if d, err := gt.Digits(); !errors.Is(err, params.ErrMalformed) {
+			t.Errorf("Digits of %v = %q, %v; want ErrMalformed", gt, d, err)
 		}
+	}
+	if _, err := params.NewGlobalTitle4(0, params.NPISDNTelephony, 0x80, "1"); !errors.Is(err, params.ErrInvalidValue) {
+		t.Errorf("NewGlobalTitle4 with an 8-bit NAI = %v, want ErrInvalidValue", err)
+	}
+}
 
-		for _, parse := range parsers {
-			_, _, _ = parse(b)
+func TestRawParameterValidate(t *testing.T) {
+	if err := (params.RawParameter{Code: 0x7f, Value: make([]byte, 255)}).Validate(); err != nil {
+		t.Errorf("255-octet raw parameter: %v", err)
+	}
+	if err := (params.RawParameter{Code: 0x7f, Value: make([]byte, 256)}).Validate(); !errors.Is(err, params.ErrInvalidValue) {
+		t.Errorf("256-octet raw parameter = %v, want ErrInvalidValue", err)
+	}
+	if err := (params.RawParameter{Code: params.PCodeEndOfOptionalParameters}).Validate(); !errors.Is(err, params.ErrInvalidValue) {
+		t.Errorf("raw end of optional parameters = %v, want ErrInvalidValue", err)
+	}
+}
+
+func TestStrings(t *testing.T) {
+	gt, _ := params.NewGlobalTitle4(0, params.NPISDNTelephony, params.NAIInternationalNumber, "123")
+	for _, s := range []string{
+		params.NewGlobalTitleAddress(gt, 6).String(),
+		params.NewPointCodeAddress(1, 2).String(),
+		params.PartyAddress{NationalUse: true}.String(),
+		(&params.GlobalTitle{Indicator: params.GTITTOnly, TranslationType: 3}).String(),
+		(&params.GlobalTitle{Indicator: params.GTITTNPES}).String(),
+		(&params.GlobalTitle{Indicator: params.GTINAIOnly}).String(),
+		params.Segmentation{}.String(),
+		params.SequencingSegmenting{}.String(),
+		params.ProtocolClass{}.String(),
+		params.RawParameter{Code: 0x55}.String(),
+		params.ReturnCauseSegmentationFailure.String(),
+		params.ReturnCause(0xff).String(),
+		params.PCodeLongData.String(),
+	} {
+		if s == "" {
+			t.Error("empty String()")
 		}
-		_, _, _ = params.ParseOptionalParameters(b)
+	}
+}
+
+// FuzzPartyAddress checks that decoding never panics and that any decoded
+// address re-encodes to contents that decode to the same address.
+func FuzzPartyAddress(f *testing.F) {
+	for _, seed := range [][]byte{
+		{0x42, 0x06},
+		{0x43, 0xff, 0x3f, 0x08},
+		{0x12, 0x06, 0x00, 0x11, 0x04, 0x21, 0x43, 0x65, 0x87, 0x09},
+		{0x04, 0x84, 0x21, 0x03},
+		{0x0a, 0x07, 0x09, 0x21},
+		{0x20, 0xaa},
+		{0x00},
+		{0xff, 0xff, 0xff, 0xff, 0xff, 0xff},
+	} {
+		f.Add(seed)
+	}
+	f.Fuzz(func(t *testing.T, wire []byte) {
+		var a params.PartyAddress
+		if err := a.UnmarshalBinary(wire); err != nil {
+			return
+		}
+		_ = a.String()
+		enc, err := a.MarshalBinary()
+		if err != nil {
+			t.Fatalf("decoded address %v does not re-encode: %v", a, err)
+		}
+		var b params.PartyAddress
+		if err := b.UnmarshalBinary(enc); err != nil {
+			t.Fatalf("re-encoded address % x does not decode: %v", enc, err)
+		}
+		if diff := cmp.Diff(a, b); diff != "" {
+			t.Fatalf("re-encoding changed the address (-first +second):\n%s", diff)
+		}
+	})
+}
+
+// FuzzBCD checks that BCD encoding round-trips every encodable signal string.
+func FuzzBCD(f *testing.F) {
+	for _, seed := range []string{"", "1", "4479000000", "9BCF", "123"} {
+		f.Add(seed)
+	}
+	f.Fuzz(func(t *testing.T, digits string) {
+		addr, odd, err := params.EncodeBCD(digits)
+		if err != nil {
+			return
+		}
+		back, err := params.DecodeBCD(addr, odd)
+		if err != nil {
+			t.Fatalf("DecodeBCD(% x, %t): %v", addr, odd, err)
+		}
+		if !bytes.EqualFold([]byte(back), []byte(digits)) {
+			t.Fatalf("BCD round trip %q -> % x -> %q", digits, addr, back)
+		}
 	})
 }

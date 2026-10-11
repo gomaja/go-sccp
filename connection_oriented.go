@@ -1,4 +1,4 @@
-// Copyright 2019-2024 go-sccp authors. All rights reserved.
+// Copyright 2019-2026 go-sccp authors. All rights reserved.
 // Use of this source code is governed by a MIT-style license that can be
 // found in the LICENSE file.
 
@@ -6,1801 +6,924 @@ package sccp
 
 import (
 	"fmt"
-	"io"
 
 	"github.com/gomaja/go-sccp/params"
 )
 
-// CR represents an SCCP Connection Request message; see ITU-T Q.713 (03/01), section 4.2.
+const (
+	// maxConnectionData is the largest data parameter of CR, CC, CREF and
+	// RLSD: "Data 3.16 O 3-130", ITU-T Q.713 (03/01) Tables 3 to 6.
+	maxConnectionData = 128
+
+	// maxExpeditedData is the largest data parameter of ED: "Data 3.16 V
+	// 2-33", ITU-T Q.713 (03/01) Table 13.
+	maxExpeditedData = 32
+)
+
+// CR is the connection request message, ITU-T Q.713 (03/01) §4.2, Table 3.
 type CR struct {
-	Type                    MsgType
-	SourceLocalReference    *params.LocalReference
-	ProtocolClass           *params.ProtocolClass
-	CalledPartyAddress      *params.PartyAddress
-	Credit                  *params.Credit
-	CallingPartyAddress     *params.PartyAddress
-	Data                    *params.Data
-	HopCounter              *params.HopCounter
-	Importance              *params.Importance
-	EndOfOptionalParameters *params.EndOfOptionalParameters
+	SourceLocalReference params.LocalReference
+	// ProtocolClass is class 2 or 3.
+	ProtocolClass      params.ProtocolClass
+	CalledPartyAddress params.PartyAddress
 
-	ptr1, ptr2 uint8
+	Credit              *params.Credit
+	CallingPartyAddress *params.PartyAddress
+	// Data is optional, 1 to 128 octets; nil or empty means absent.
+	Data         []byte
+	HopCounter   *params.HopCounter
+	Importance   *params.Importance
+	Unrecognized []params.RawParameter
 }
 
-// NewCR creates a new CR.
-func NewCR(src uint32, pcls int, retOnErr bool, cdpa *params.PartyAddress, opts ...params.Parameter) *CR {
-	c := &CR{
-		Type:                 MsgTypeCR,
-		SourceLocalReference: params.NewSourceLocalReference(src),
-		ProtocolClass:        params.NewProtocolClass(pcls, retOnErr),
-		CalledPartyAddress:   cdpa,
-		ptr1:                 2,
-	}
-	c.ptr2 = 0
+// MessageType returns MsgTypeCR.
+func (*CR) MessageType() MsgType { return MsgTypeCR }
 
-	assignCROptionalParameters("NewCR", opts, c)
-	if len(opts) > 0 {
-		c.ptr2 = c.ptr1 + uint8(cdpa.MarshalLen()) - 1
-	}
+// MarshalBinary encodes the message; see Message.
+func (m *CR) MarshalBinary() ([]byte, error) { return marshalDefault(m) }
 
-	return c
+// AppendBinary appends the encoded message to b; see Message.
+func (m *CR) AppendBinary(b []byte) ([]byte, error) { return appendDefault(b, m) }
+
+var crCodes = []params.ParameterNameCode{params.PCodeCredit, params.PCodeCallingPartyAddress, params.PCodeData, params.PCodeHopCounter, params.PCodeImportance}
+
+func (m *CR) appendMessage(b []byte) ([]byte, error) {
+	e := newEncoder(b, MsgTypeCR)
+	e.fixed("source local reference", m.SourceLocalReference)
+	e.connectionOrientedClass(m.ProtocolClass)
+	e.pointers(2, 1, true)
+	e.address(0, "called party address", m.CalledPartyAddress, false)
+	if m.Credit != nil {
+		e.optional(params.PCodeCredit, "credit", *m.Credit)
+	}
+	if m.CallingPartyAddress != nil {
+		e.optionalAddress(params.PCodeCallingPartyAddress, "calling party address", *m.CallingPartyAddress)
+	}
+	e.optionalData("data", m.Data, maxConnectionData)
+	if m.HopCounter != nil {
+		e.optional(params.PCodeHopCounter, "hop counter", *m.HopCounter)
+	}
+	if m.Importance != nil {
+		e.optional(params.PCodeImportance, "importance", *m.Importance)
+	}
+	e.raws(m.Unrecognized, crCodes)
+	return e.finish()
 }
 
-// MarshalBinary returns the byte sequence generated from a CR instance.
-func (c *CR) MarshalBinary() ([]byte, error) {
-	b := make([]byte, c.MarshalLen())
-	if err := c.MarshalTo(b); err != nil {
-		return nil, err
-	}
-	return b, nil
-}
-
-// MarshalTo puts the byte sequence in the byte array given as b.
-func (c *CR) MarshalTo(b []byte) error {
-	l := len(b)
-	if l < 7 {
-		return io.ErrUnexpectedEOF
-	}
-
-	b[0] = uint8(c.Type)
-	offset := 1
-	n, err := c.SourceLocalReference.Write(b[offset:])
+// UnmarshalBinary decodes a CR; see Message.
+func (m *CR) UnmarshalBinary(b []byte) error {
+	d, err := newDecoder(b, MsgTypeCR)
 	if err != nil {
 		return err
 	}
-	offset += n
-	n, err = c.ProtocolClass.Write(b[offset:])
+	var v CR
+	if err := d.fixedParam("source local reference", 3, &v.SourceLocalReference); err != nil {
+		return err
+	}
+	if err := d.fixedParam("protocol class", 1, &v.ProtocolClass); err != nil {
+		return err
+	}
+	if err := d.pointers(2, 1); err != nil {
+		return err
+	}
+	if err := d.variableParam(0, "called party address", &v.CalledPartyAddress); err != nil {
+		return err
+	}
+	v.Unrecognized, err = d.optional(1, []optSpec{
+		{params.PCodeCredit, "credit", optValue(&v.Credit)},
+		{params.PCodeCallingPartyAddress, "calling party address", optValue(&v.CallingPartyAddress)},
+		{params.PCodeData, "data", optBytes(&v.Data)},
+		{params.PCodeHopCounter, "hop counter", optValue(&v.HopCounter)},
+		{params.PCodeImportance, "importance", optValue(&v.Importance)},
+	})
 	if err != nil {
 		return err
 	}
-	offset += n
-
-	b[offset] = c.ptr1
-	b[offset+1] = c.ptr2
-	offset += 2
-
-	cdpaEnd := l
-	if c.ptr2 != 0 {
-		cdpaEnd = 6 + int(c.ptr2)
-		if l < cdpaEnd {
-			return io.ErrUnexpectedEOF
-		}
-	}
-	if _, err := c.CalledPartyAddress.Write(b[offset:cdpaEnd]); err != nil {
-		return err
-	}
-	if c.ptr2 == 0 {
-		return nil
-	}
-
-	return writeOptionalParameterList(
-		b[cdpaEnd:],
-		c.Credit,
-		c.CallingPartyAddress,
-		c.Data,
-		c.HopCounter,
-		c.Importance,
-		c.EndOfOptionalParameters,
-	)
+	*m = v
+	return nil
 }
 
-// ParseCR decodes given byte sequence as a SCCP CR.
-func ParseCR(b []byte) (*CR, error) {
-	c := &CR{}
-	if err := c.UnmarshalBinary(b); err != nil {
-		return nil, err
-	}
-	return c, nil
+// String returns the message in a human readable form.
+func (m *CR) String() string {
+	return fmt.Sprintf("CR{SourceLocalReference: %#06x, ProtocolClass: %s, CalledPartyAddress: %s%s}",
+		uint32(m.SourceLocalReference), m.ProtocolClass, m.CalledPartyAddress,
+		connectionOptionalString(m.Credit, m.CallingPartyAddress, nil, m.Data, m.HopCounter, m.Importance, m.Unrecognized))
 }
 
-// UnmarshalBinary sets the values retrieved from byte sequence in a SCCP CR.
-func (c *CR) UnmarshalBinary(b []byte) error {
-	l := len(b)
-	if l < 7 {
-		return io.ErrUnexpectedEOF
-	}
-
-	c.Type = MsgType(b[0])
-	offset := 1
-	var n int
-	var err error
-	c.SourceLocalReference, n, err = params.ParseSourceLocalReference(b[offset:])
-	if err != nil {
-		return err
-	}
-	offset += n
-	c.ProtocolClass, n, err = params.ParseProtocolClass(b[offset:])
-	if err != nil {
-		return err
-	}
-	offset += n
-
-	c.ptr1 = b[offset]
-	offsetPtr1 := 5 + int(c.ptr1)
-	if l < offsetPtr1+1 {
-		return io.ErrUnexpectedEOF
-	}
-	c.ptr2 = b[offset+1]
-
-	cdpaEnd := offsetPtr1 + int(b[offsetPtr1]) + 1
-	if l < cdpaEnd {
-		return io.ErrUnexpectedEOF
-	}
-	c.CalledPartyAddress, _, err = params.ParseCalledPartyAddress(b[offsetPtr1:cdpaEnd])
-	if err != nil {
-		return err
-	}
-
-	if c.ptr2 == 0 {
-		return nil
-	}
-	offsetPtr2 := 6 + int(c.ptr2)
-	if l < offsetPtr2+1 {
-		return io.ErrUnexpectedEOF
-	}
-	if offsetPtr2 != cdpaEnd {
-		return fmt.Errorf("invalid CR optional pointer: expected %d, got %d", cdpaEnd-6, c.ptr2)
-	}
-	return parseCROptionalParameters(b[offsetPtr2:], c)
-}
-
-// MarshalLen returns the serial length.
-func (c *CR) MarshalLen() int {
-	l := 7
-	if param := c.CalledPartyAddress; param != nil {
-		l += param.MarshalLen()
-	}
-	if c.ptr2 != 0 {
-		l += optionalParameterListLen(
-			c.Credit,
-			c.CallingPartyAddress,
-			c.Data,
-			c.HopCounter,
-			c.Importance,
-			c.EndOfOptionalParameters,
-		)
-	}
-	return l
-}
-
-// String returns the CR values in human readable format.
-func (c *CR) String() string {
-	return fmt.Sprintf("%s: {SourceLocalReference: %s, ProtocolClass: %s, CalledPartyAddress: %v, Credit: %s, CallingPartyAddress: %v, Data: %s, HopCounter: %s, Importance: %s}",
-		c.Type, c.SourceLocalReference, c.ProtocolClass, c.CalledPartyAddress, c.Credit, c.CallingPartyAddress, c.Data, c.HopCounter, c.Importance)
-}
-
-// MessageType returns the Message Type in int.
-func (c *CR) MessageType() MsgType { return MsgTypeCR }
-
-// MessageTypeName returns the Message Type in string.
-func (c *CR) MessageTypeName() string { return c.MessageType().String() }
-
-// CC represents an SCCP Connection Confirm message; see ITU-T Q.713 (03/01), section 4.3.
+// CC is the connection confirm message, ITU-T Q.713 (03/01) §4.3, Table 4.
 type CC struct {
-	Type                      MsgType
-	DestinationLocalReference *params.LocalReference
-	SourceLocalReference      *params.LocalReference
-	ProtocolClass             *params.ProtocolClass
-	Credit                    *params.Credit
-	CalledPartyAddress        *params.PartyAddress
-	Data                      *params.Data
-	Importance                *params.Importance
-	EndOfOptionalParameters   *params.EndOfOptionalParameters
+	DestinationLocalReference params.LocalReference
+	SourceLocalReference      params.LocalReference
+	// ProtocolClass is class 2 or 3.
+	ProtocolClass params.ProtocolClass
 
-	ptr1 uint8
+	Credit             *params.Credit
+	CalledPartyAddress *params.PartyAddress
+	// Data is optional, 1 to 128 octets; nil or empty means absent.
+	Data         []byte
+	Importance   *params.Importance
+	Unrecognized []params.RawParameter
 }
 
-// NewCC creates a new CC.
-func NewCC(dst, src uint32, pcls int, retOnErr bool, opts ...params.Parameter) *CC {
-	c := &CC{
-		Type:                      MsgTypeCC,
-		DestinationLocalReference: params.NewDestinationLocalReference(dst),
-		SourceLocalReference:      params.NewSourceLocalReference(src),
-		ProtocolClass:             params.NewProtocolClass(pcls, retOnErr),
+// MessageType returns MsgTypeCC.
+func (*CC) MessageType() MsgType { return MsgTypeCC }
+
+// MarshalBinary encodes the message; see Message.
+func (m *CC) MarshalBinary() ([]byte, error) { return marshalDefault(m) }
+
+// AppendBinary appends the encoded message to b; see Message.
+func (m *CC) AppendBinary(b []byte) ([]byte, error) { return appendDefault(b, m) }
+
+var ccCodes = []params.ParameterNameCode{params.PCodeCredit, params.PCodeCalledPartyAddress, params.PCodeData, params.PCodeImportance}
+
+func (m *CC) appendMessage(b []byte) ([]byte, error) {
+	e := newEncoder(b, MsgTypeCC)
+	e.fixed("destination local reference", m.DestinationLocalReference)
+	e.fixed("source local reference", m.SourceLocalReference)
+	e.connectionOrientedClass(m.ProtocolClass)
+	e.pointers(1, 1, true)
+	if m.Credit != nil {
+		e.optional(params.PCodeCredit, "credit", *m.Credit)
 	}
-	assignCCOptionalParameters("NewCC", opts, c)
-	if len(opts) > 0 {
-		c.ptr1 = 1
+	if m.CalledPartyAddress != nil {
+		e.optionalAddress(params.PCodeCalledPartyAddress, "called party address", *m.CalledPartyAddress)
 	}
-	return c
+	e.optionalData("data", m.Data, maxConnectionData)
+	if m.Importance != nil {
+		e.optional(params.PCodeImportance, "importance", *m.Importance)
+	}
+	e.raws(m.Unrecognized, ccCodes)
+	return e.finish()
 }
 
-// MarshalBinary returns the byte sequence generated from a CC instance.
-func (c *CC) MarshalBinary() ([]byte, error) {
-	b := make([]byte, c.MarshalLen())
-	if err := c.MarshalTo(b); err != nil {
-		return nil, err
-	}
-	return b, nil
-}
-
-// MarshalTo puts the byte sequence in the byte array given as b.
-func (c *CC) MarshalTo(b []byte) error {
-	if len(b) < 9 {
-		return io.ErrUnexpectedEOF
-	}
-	b[0] = uint8(c.Type)
-	offset := 1
-	n, err := c.DestinationLocalReference.Write(b[offset:])
+// UnmarshalBinary decodes a CC; see Message.
+func (m *CC) UnmarshalBinary(b []byte) error {
+	d, err := newDecoder(b, MsgTypeCC)
 	if err != nil {
 		return err
 	}
-	offset += n
-	n, err = c.SourceLocalReference.Write(b[offset:])
+	var v CC
+	if err := d.fixedParam("destination local reference", 3, &v.DestinationLocalReference); err != nil {
+		return err
+	}
+	if err := d.fixedParam("source local reference", 3, &v.SourceLocalReference); err != nil {
+		return err
+	}
+	if err := d.fixedParam("protocol class", 1, &v.ProtocolClass); err != nil {
+		return err
+	}
+	if err := d.pointers(1, 1); err != nil {
+		return err
+	}
+	v.Unrecognized, err = d.optional(0, []optSpec{
+		{params.PCodeCredit, "credit", optValue(&v.Credit)},
+		{params.PCodeCalledPartyAddress, "called party address", optValue(&v.CalledPartyAddress)},
+		{params.PCodeData, "data", optBytes(&v.Data)},
+		{params.PCodeImportance, "importance", optValue(&v.Importance)},
+	})
 	if err != nil {
 		return err
 	}
-	offset += n
-	n, err = c.ProtocolClass.Write(b[offset:])
-	if err != nil {
-		return err
-	}
-	offset += n
-	b[offset] = c.ptr1
-	offset++
-	if c.ptr1 == 0 {
-		return nil
-	}
-	return writeOptionalParameterList(b[offset:], c.Credit, c.CalledPartyAddress, c.Data, c.Importance, c.EndOfOptionalParameters)
+	*m = v
+	return nil
 }
 
-// ParseCC decodes given byte sequence as a SCCP CC.
-func ParseCC(b []byte) (*CC, error) {
-	c := &CC{}
-	if err := c.UnmarshalBinary(b); err != nil {
-		return nil, err
-	}
-	return c, nil
+// String returns the message in a human readable form.
+func (m *CC) String() string {
+	return fmt.Sprintf("CC{DestinationLocalReference: %#06x, SourceLocalReference: %#06x, ProtocolClass: %s%s}",
+		uint32(m.DestinationLocalReference), uint32(m.SourceLocalReference), m.ProtocolClass,
+		connectionOptionalString(m.Credit, nil, m.CalledPartyAddress, m.Data, nil, m.Importance, m.Unrecognized))
 }
 
-// UnmarshalBinary sets the values retrieved from byte sequence in a SCCP CC.
-func (c *CC) UnmarshalBinary(b []byte) error {
-	l := len(b)
-	if l < 9 {
-		return io.ErrUnexpectedEOF
-	}
-	c.Type = MsgType(b[0])
-	offset := 1
-	var n int
-	var err error
-	c.DestinationLocalReference, n, err = params.ParseDestinationLocalReference(b[offset:])
-	if err != nil {
-		return err
-	}
-	offset += n
-	c.SourceLocalReference, n, err = params.ParseSourceLocalReference(b[offset:])
-	if err != nil {
-		return err
-	}
-	offset += n
-	c.ProtocolClass, n, err = params.ParseProtocolClass(b[offset:])
-	if err != nil {
-		return err
-	}
-	offset += n
-	c.ptr1 = b[offset]
-	if c.ptr1 == 0 {
-		return nil
-	}
-	offsetPtr1 := 8 + int(c.ptr1)
-	if l < offsetPtr1+1 {
-		return io.ErrUnexpectedEOF
-	}
-	return parseCCOptionalParameters(b[offsetPtr1:], c)
-}
-
-// MarshalLen returns the serial length.
-func (c *CC) MarshalLen() int {
-	l := 9
-	if c.ptr1 != 0 {
-		l += optionalParameterListLen(c.Credit, c.CalledPartyAddress, c.Data, c.Importance, c.EndOfOptionalParameters)
-	}
-	return l
-}
-
-// String returns the CC values in human readable format.
-func (c *CC) String() string {
-	return fmt.Sprintf("%s: {DestinationLocalReference: %s, SourceLocalReference: %s, ProtocolClass: %s, Credit: %s, CalledPartyAddress: %v, Data: %s, Importance: %s}",
-		c.Type, c.DestinationLocalReference, c.SourceLocalReference, c.ProtocolClass, c.Credit, c.CalledPartyAddress, c.Data, c.Importance)
-}
-
-// MessageType returns the Message Type in int.
-func (c *CC) MessageType() MsgType { return MsgTypeCC }
-
-// MessageTypeName returns the Message Type in string.
-func (c *CC) MessageTypeName() string { return c.MessageType().String() }
-
-// CREF represents an SCCP Connection Refused message; see ITU-T Q.713 (03/01), section 4.4.
+// CREF is the connection refused message, ITU-T Q.713 (03/01) §4.4, Table 5.
 type CREF struct {
-	Type                      MsgType
-	DestinationLocalReference *params.LocalReference
-	RefusalCause              *params.RefusalCause
-	CalledPartyAddress        *params.PartyAddress
-	Data                      *params.Data
-	Importance                *params.Importance
-	EndOfOptionalParameters   *params.EndOfOptionalParameters
+	DestinationLocalReference params.LocalReference
+	RefusalCause              params.RefusalCause
 
-	ptr1 uint8
+	CalledPartyAddress *params.PartyAddress
+	// Data is optional, 1 to 128 octets; nil or empty means absent.
+	Data         []byte
+	Importance   *params.Importance
+	Unrecognized []params.RawParameter
 }
 
-// NewCREF creates a new CREF.
-func NewCREF(dst uint32, cause params.RefusalCauseValue, opts ...params.Parameter) *CREF {
-	c := &CREF{
-		Type:                      MsgTypeCREF,
-		DestinationLocalReference: params.NewDestinationLocalReference(dst),
-		RefusalCause:              params.NewCause(cause),
+// MessageType returns MsgTypeCREF.
+func (*CREF) MessageType() MsgType { return MsgTypeCREF }
+
+// MarshalBinary encodes the message; see Message.
+func (m *CREF) MarshalBinary() ([]byte, error) { return marshalDefault(m) }
+
+// AppendBinary appends the encoded message to b; see Message.
+func (m *CREF) AppendBinary(b []byte) ([]byte, error) { return appendDefault(b, m) }
+
+var crefCodes = []params.ParameterNameCode{params.PCodeCalledPartyAddress, params.PCodeData, params.PCodeImportance}
+
+func (m *CREF) appendMessage(b []byte) ([]byte, error) {
+	e := newEncoder(b, MsgTypeCREF)
+	e.fixed("destination local reference", m.DestinationLocalReference)
+	e.cause("refusal cause", byte(m.RefusalCause))
+	e.pointers(1, 1, true)
+	if m.CalledPartyAddress != nil {
+		e.optionalAddress(params.PCodeCalledPartyAddress, "called party address", *m.CalledPartyAddress)
 	}
-	assignCREFOptionalParameters("NewCREF", opts, c)
-	if len(opts) > 0 {
-		c.ptr1 = 1
+	e.optionalData("data", m.Data, maxConnectionData)
+	if m.Importance != nil {
+		e.optional(params.PCodeImportance, "importance", *m.Importance)
 	}
-	return c
+	e.raws(m.Unrecognized, crefCodes)
+	return e.finish()
 }
 
-// MarshalBinary returns the byte sequence generated from a CREF instance.
-func (c *CREF) MarshalBinary() ([]byte, error) {
-	b := make([]byte, c.MarshalLen())
-	if err := c.MarshalTo(b); err != nil {
-		return nil, err
-	}
-	return b, nil
-}
-
-// MarshalTo puts the byte sequence in the byte array given as b.
-func (c *CREF) MarshalTo(b []byte) error {
-	if len(b) < 6 {
-		return io.ErrUnexpectedEOF
-	}
-	b[0] = uint8(c.Type)
-	offset := 1
-	n, err := c.DestinationLocalReference.Write(b[offset:])
+// UnmarshalBinary decodes a CREF; see Message.
+func (m *CREF) UnmarshalBinary(b []byte) error {
+	d, err := newDecoder(b, MsgTypeCREF)
 	if err != nil {
 		return err
 	}
-	offset += n
-	n, err = c.RefusalCause.Write(b[offset:])
+	var v CREF
+	if err := d.fixedParam("destination local reference", 3, &v.DestinationLocalReference); err != nil {
+		return err
+	}
+	cause, err := d.fixed("refusal cause", 1)
 	if err != nil {
 		return err
 	}
-	offset += n
-	b[offset] = c.ptr1
-	offset++
-	if c.ptr1 == 0 {
-		return nil
+	v.RefusalCause = params.RefusalCause(cause[0])
+	if err := d.pointers(1, 1); err != nil {
+		return err
 	}
-	return writeOptionalParameterList(b[offset:], c.CalledPartyAddress, c.Data, c.Importance, c.EndOfOptionalParameters)
-}
-
-// ParseCREF decodes given byte sequence as a SCCP CREF.
-func ParseCREF(b []byte) (*CREF, error) {
-	c := &CREF{}
-	if err := c.UnmarshalBinary(b); err != nil {
-		return nil, err
-	}
-	return c, nil
-}
-
-// UnmarshalBinary sets the values retrieved from byte sequence in a SCCP CREF.
-func (c *CREF) UnmarshalBinary(b []byte) error {
-	l := len(b)
-	if l < 6 {
-		return io.ErrUnexpectedEOF
-	}
-	c.Type = MsgType(b[0])
-	offset := 1
-	var n int
-	var err error
-	c.DestinationLocalReference, n, err = params.ParseDestinationLocalReference(b[offset:])
+	v.Unrecognized, err = d.optional(0, []optSpec{
+		{params.PCodeCalledPartyAddress, "called party address", optValue(&v.CalledPartyAddress)},
+		{params.PCodeData, "data", optBytes(&v.Data)},
+		{params.PCodeImportance, "importance", optValue(&v.Importance)},
+	})
 	if err != nil {
 		return err
 	}
-	offset += n
-	c.RefusalCause, n, err = params.ParseRefusalCause(b[offset:])
-	if err != nil {
-		return err
-	}
-	offset += n
-	c.ptr1 = b[offset]
-	if c.ptr1 == 0 {
-		return nil
-	}
-	offsetPtr1 := 5 + int(c.ptr1)
-	if l < offsetPtr1+1 {
-		return io.ErrUnexpectedEOF
-	}
-	return parseCREFOptionalParameters(b[offsetPtr1:], c)
+	*m = v
+	return nil
 }
 
-// MarshalLen returns the serial length.
-func (c *CREF) MarshalLen() int {
-	l := 6
-	if c.ptr1 != 0 {
-		l += optionalParameterListLen(c.CalledPartyAddress, c.Data, c.Importance, c.EndOfOptionalParameters)
-	}
-	return l
+// String returns the message in a human readable form.
+func (m *CREF) String() string {
+	return fmt.Sprintf("CREF{DestinationLocalReference: %#06x, RefusalCause: %s%s}",
+		uint32(m.DestinationLocalReference), m.RefusalCause,
+		connectionOptionalString(nil, nil, m.CalledPartyAddress, m.Data, nil, m.Importance, m.Unrecognized))
 }
 
-// String returns the CREF values in human readable format.
-func (c *CREF) String() string {
-	return fmt.Sprintf("%s: {DestinationLocalReference: %s, RefusalCause: %s, CalledPartyAddress: %v, Data: %s, Importance: %s}",
-		c.Type, c.DestinationLocalReference, c.RefusalCause, c.CalledPartyAddress, c.Data, c.Importance)
-}
-
-// MessageType returns the Message Type in int.
-func (c *CREF) MessageType() MsgType { return MsgTypeCREF }
-
-// MessageTypeName returns the Message Type in string.
-func (c *CREF) MessageTypeName() string { return c.MessageType().String() }
-
-// RLSD represents an SCCP Released message; see ITU-T Q.713 (03/01), section 4.5.
+// RLSD is the released message, ITU-T Q.713 (03/01) §4.5, Table 6.
 type RLSD struct {
-	Type                      MsgType
-	DestinationLocalReference *params.LocalReference
-	SourceLocalReference      *params.LocalReference
-	ReleaseCause              *params.ReleaseCause
-	Data                      *params.Data
-	Importance                *params.Importance
-	EndOfOptionalParameters   *params.EndOfOptionalParameters
+	DestinationLocalReference params.LocalReference
+	SourceLocalReference      params.LocalReference
+	ReleaseCause              params.ReleaseCause
 
-	ptr1 uint8
+	// Data is optional, 1 to 128 octets; nil or empty means absent.
+	Data         []byte
+	Importance   *params.Importance
+	Unrecognized []params.RawParameter
 }
 
-// NewRLSD creates a new RLSD.
-func NewRLSD(dst, src uint32, cause params.ReleaseCauseValue, opts ...params.Parameter) *RLSD {
-	r := &RLSD{
-		Type:                      MsgTypeRLSD,
-		DestinationLocalReference: params.NewDestinationLocalReference(dst),
-		SourceLocalReference:      params.NewSourceLocalReference(src),
-		ReleaseCause:              params.NewCause(cause),
+// MessageType returns MsgTypeRLSD.
+func (*RLSD) MessageType() MsgType { return MsgTypeRLSD }
+
+// MarshalBinary encodes the message; see Message.
+func (m *RLSD) MarshalBinary() ([]byte, error) { return marshalDefault(m) }
+
+// AppendBinary appends the encoded message to b; see Message.
+func (m *RLSD) AppendBinary(b []byte) ([]byte, error) { return appendDefault(b, m) }
+
+var rlsdCodes = []params.ParameterNameCode{params.PCodeData, params.PCodeImportance}
+
+func (m *RLSD) appendMessage(b []byte) ([]byte, error) {
+	e := newEncoder(b, MsgTypeRLSD)
+	e.fixed("destination local reference", m.DestinationLocalReference)
+	e.fixed("source local reference", m.SourceLocalReference)
+	e.cause("release cause", byte(m.ReleaseCause))
+	e.pointers(1, 1, true)
+	e.optionalData("data", m.Data, maxConnectionData)
+	if m.Importance != nil {
+		e.optional(params.PCodeImportance, "importance", *m.Importance)
 	}
-	assignRLSDOptionalParameters("NewRLSD", opts, r)
-	if len(opts) > 0 {
-		r.ptr1 = 1
-	}
-	return r
+	e.raws(m.Unrecognized, rlsdCodes)
+	return e.finish()
 }
 
-// MarshalBinary returns the byte sequence generated from a RLSD instance.
-func (r *RLSD) MarshalBinary() ([]byte, error) {
-	b := make([]byte, r.MarshalLen())
-	if err := r.MarshalTo(b); err != nil {
-		return nil, err
-	}
-	return b, nil
-}
-
-// MarshalTo puts the byte sequence in the byte array given as b.
-func (r *RLSD) MarshalTo(b []byte) error {
-	if len(b) < 9 {
-		return io.ErrUnexpectedEOF
-	}
-	b[0] = uint8(r.Type)
-	offset := 1
-	n, err := r.DestinationLocalReference.Write(b[offset:])
+// UnmarshalBinary decodes an RLSD; see Message.
+func (m *RLSD) UnmarshalBinary(b []byte) error {
+	d, err := newDecoder(b, MsgTypeRLSD)
 	if err != nil {
 		return err
 	}
-	offset += n
-	n, err = r.SourceLocalReference.Write(b[offset:])
+	var v RLSD
+	if err := d.fixedParam("destination local reference", 3, &v.DestinationLocalReference); err != nil {
+		return err
+	}
+	if err := d.fixedParam("source local reference", 3, &v.SourceLocalReference); err != nil {
+		return err
+	}
+	cause, err := d.fixed("release cause", 1)
 	if err != nil {
 		return err
 	}
-	offset += n
-	n, err = r.ReleaseCause.Write(b[offset:])
+	v.ReleaseCause = params.ReleaseCause(cause[0])
+	if err := d.pointers(1, 1); err != nil {
+		return err
+	}
+	v.Unrecognized, err = d.optional(0, []optSpec{
+		{params.PCodeData, "data", optBytes(&v.Data)},
+		{params.PCodeImportance, "importance", optValue(&v.Importance)},
+	})
 	if err != nil {
 		return err
 	}
-	offset += n
-	b[offset] = r.ptr1
-	offset++
-	if r.ptr1 == 0 {
-		return nil
-	}
-	return writeOptionalParameterList(b[offset:], r.Data, r.Importance, r.EndOfOptionalParameters)
+	*m = v
+	return nil
 }
 
-// ParseRLSD decodes given byte sequence as a SCCP RLSD.
-func ParseRLSD(b []byte) (*RLSD, error) {
-	r := &RLSD{}
-	if err := r.UnmarshalBinary(b); err != nil {
-		return nil, err
-	}
-	return r, nil
+// String returns the message in a human readable form.
+func (m *RLSD) String() string {
+	return fmt.Sprintf("RLSD{DestinationLocalReference: %#06x, SourceLocalReference: %#06x, ReleaseCause: %s%s}",
+		uint32(m.DestinationLocalReference), uint32(m.SourceLocalReference), m.ReleaseCause,
+		connectionOptionalString(nil, nil, nil, m.Data, nil, m.Importance, m.Unrecognized))
 }
 
-// UnmarshalBinary sets the values retrieved from byte sequence in a SCCP RLSD.
-func (r *RLSD) UnmarshalBinary(b []byte) error {
-	l := len(b)
-	if l < 9 {
-		return io.ErrUnexpectedEOF
-	}
-	r.Type = MsgType(b[0])
-	offset := 1
-	var n int
-	var err error
-	r.DestinationLocalReference, n, err = params.ParseDestinationLocalReference(b[offset:])
-	if err != nil {
-		return err
-	}
-	offset += n
-	r.SourceLocalReference, n, err = params.ParseSourceLocalReference(b[offset:])
-	if err != nil {
-		return err
-	}
-	offset += n
-	r.ReleaseCause, n, err = params.ParseReleaseCause(b[offset:])
-	if err != nil {
-		return err
-	}
-	offset += n
-	r.ptr1 = b[offset]
-	if r.ptr1 == 0 {
-		return nil
-	}
-	offsetPtr1 := 8 + int(r.ptr1)
-	if l < offsetPtr1+1 {
-		return io.ErrUnexpectedEOF
-	}
-	return parseRLSDOptionalParameters(b[offsetPtr1:], r)
-}
-
-// MarshalLen returns the serial length.
-func (r *RLSD) MarshalLen() int {
-	l := 9
-	if r.ptr1 != 0 {
-		l += optionalParameterListLen(r.Data, r.Importance, r.EndOfOptionalParameters)
-	}
-	return l
-}
-
-// String returns the RLSD values in human readable format.
-func (r *RLSD) String() string {
-	return fmt.Sprintf("%s: {DestinationLocalReference: %s, SourceLocalReference: %s, ReleaseCause: %s, Data: %s, Importance: %s}",
-		r.Type, r.DestinationLocalReference, r.SourceLocalReference, r.ReleaseCause, r.Data, r.Importance)
-}
-
-// MessageType returns the Message Type in int.
-func (r *RLSD) MessageType() MsgType { return MsgTypeRLSD }
-
-// MessageTypeName returns the Message Type in string.
-func (r *RLSD) MessageTypeName() string { return r.MessageType().String() }
-
-// RLC represents an SCCP Release Complete message; see ITU-T Q.713 (03/01), section 4.6.
+// RLC is the release complete message, ITU-T Q.713 (03/01) §4.6, Table 7.
 type RLC struct {
-	Type                      MsgType
-	DestinationLocalReference *params.LocalReference
-	SourceLocalReference      *params.LocalReference
+	DestinationLocalReference params.LocalReference
+	SourceLocalReference      params.LocalReference
 }
 
-// NewRLC creates a new RLC.
-func NewRLC(dst, src uint32) *RLC {
-	return &RLC{
-		Type:                      MsgTypeRLC,
-		DestinationLocalReference: params.NewDestinationLocalReference(dst),
-		SourceLocalReference:      params.NewSourceLocalReference(src),
-	}
+// MessageType returns MsgTypeRLC.
+func (*RLC) MessageType() MsgType { return MsgTypeRLC }
+
+// MarshalBinary encodes the message; see Message.
+func (m *RLC) MarshalBinary() ([]byte, error) { return marshalDefault(m) }
+
+// AppendBinary appends the encoded message to b; see Message.
+func (m *RLC) AppendBinary(b []byte) ([]byte, error) { return appendDefault(b, m) }
+
+func (m *RLC) appendMessage(b []byte) ([]byte, error) {
+	e := newEncoder(b, MsgTypeRLC)
+	e.fixed("destination local reference", m.DestinationLocalReference)
+	e.fixed("source local reference", m.SourceLocalReference)
+	return e.finish()
 }
 
-// MarshalBinary returns the byte sequence generated from a RLC instance.
-func (r *RLC) MarshalBinary() ([]byte, error) {
-	b := make([]byte, r.MarshalLen())
-	if err := r.MarshalTo(b); err != nil {
-		return nil, err
-	}
-	return b, nil
-}
-
-// MarshalTo puts the byte sequence in the byte array given as b.
-func (r *RLC) MarshalTo(b []byte) error {
-	if len(b) < r.MarshalLen() {
-		return io.ErrUnexpectedEOF
-	}
-	b[0] = uint8(r.Type)
-	offset := 1
-	n, err := r.DestinationLocalReference.Write(b[offset:])
+// UnmarshalBinary decodes an RLC; see Message.
+func (m *RLC) UnmarshalBinary(b []byte) error {
+	d, err := newDecoder(b, MsgTypeRLC)
 	if err != nil {
 		return err
 	}
-	offset += n
-	_, err = r.SourceLocalReference.Write(b[offset:])
-	return err
-}
-
-// ParseRLC decodes given byte sequence as a SCCP RLC.
-func ParseRLC(b []byte) (*RLC, error) {
-	r := &RLC{}
-	if err := r.UnmarshalBinary(b); err != nil {
-		return nil, err
-	}
-	return r, nil
-}
-
-// UnmarshalBinary sets the values retrieved from byte sequence in a SCCP RLC.
-func (r *RLC) UnmarshalBinary(b []byte) error {
-	if len(b) < 7 {
-		return io.ErrUnexpectedEOF
-	}
-	r.Type = MsgType(b[0])
-	var n int
-	var err error
-	offset := 1
-	r.DestinationLocalReference, n, err = params.ParseDestinationLocalReference(b[offset:])
-	if err != nil {
+	var v RLC
+	if err := d.fixedParam("destination local reference", 3, &v.DestinationLocalReference); err != nil {
 		return err
 	}
-	offset += n
-	r.SourceLocalReference, _, err = params.ParseSourceLocalReference(b[offset:])
-	return err
+	if err := d.fixedParam("source local reference", 3, &v.SourceLocalReference); err != nil {
+		return err
+	}
+	*m = v
+	return nil
 }
 
-// MarshalLen returns the serial length.
-func (r *RLC) MarshalLen() int { return 7 }
-
-// String returns the RLC values in human readable format.
-func (r *RLC) String() string {
-	return fmt.Sprintf("%s: {DestinationLocalReference: %s, SourceLocalReference: %s}", r.Type, r.DestinationLocalReference, r.SourceLocalReference)
+// String returns the message in a human readable form.
+func (m *RLC) String() string {
+	return fmt.Sprintf("RLC{DestinationLocalReference: %#06x, SourceLocalReference: %#06x}",
+		uint32(m.DestinationLocalReference), uint32(m.SourceLocalReference))
 }
 
-// MessageType returns the Message Type in int.
-func (r *RLC) MessageType() MsgType { return MsgTypeRLC }
-
-// MessageTypeName returns the Message Type in string.
-func (r *RLC) MessageTypeName() string { return r.MessageType().String() }
-
-// DT1 represents an SCCP Data Form 1 message; see ITU-T Q.713 (03/01), section 4.7.
+// DT1 is the data form 1 message, ITU-T Q.713 (03/01) §4.7, Table 8.
 type DT1 struct {
-	Type                      MsgType
-	DestinationLocalReference *params.LocalReference
-	SegmentingReassembling    *params.SegmentingReassembling
-	Data                      *params.Data
-
-	ptr1 uint8
+	DestinationLocalReference params.LocalReference
+	// MoreData is the M bit of the segmenting/reassembling parameter (§3.7).
+	MoreData bool
+	// Data is 1 to 255 octets (§3.16).
+	Data []byte
 }
 
-// NewDT1 creates a new DT1.
-func NewDT1(dst uint32, moreData bool, data []byte) *DT1 {
-	return &DT1{
-		Type:                      MsgTypeDT1,
-		DestinationLocalReference: params.NewDestinationLocalReference(dst),
-		SegmentingReassembling:    params.NewSegmentingReassembling(moreData),
-		Data:                      params.NewData(data),
-		ptr1:                      1,
-	}
+// MessageType returns MsgTypeDT1.
+func (*DT1) MessageType() MsgType { return MsgTypeDT1 }
+
+// MarshalBinary encodes the message; see Message.
+func (m *DT1) MarshalBinary() ([]byte, error) { return marshalDefault(m) }
+
+// AppendBinary appends the encoded message to b; see Message.
+func (m *DT1) AppendBinary(b []byte) ([]byte, error) { return appendDefault(b, m) }
+
+func (m *DT1) appendMessage(b []byte) ([]byte, error) {
+	e := newEncoder(b, MsgTypeDT1)
+	e.fixed("destination local reference", m.DestinationLocalReference)
+	e.octet(moreDataOctet(m.MoreData))
+	e.pointers(1, 1, false)
+	e.data(0, "data", m.Data, maxData)
+	return e.finish()
 }
 
-// MarshalBinary returns the byte sequence generated from a DT1 instance.
-func (d *DT1) MarshalBinary() ([]byte, error) {
-	b := make([]byte, d.MarshalLen())
-	if err := d.MarshalTo(b); err != nil {
-		return nil, err
-	}
-	return b, nil
-}
-
-// MarshalTo puts the byte sequence in the byte array given as b.
-func (d *DT1) MarshalTo(b []byte) error {
-	if len(b) < 6 {
-		return io.ErrUnexpectedEOF
-	}
-	b[0] = uint8(d.Type)
-	offset := 1
-	n, err := d.DestinationLocalReference.Write(b[offset:])
+// UnmarshalBinary decodes a DT1; see Message. Bits 8-2 of the
+// segmenting/reassembling parameter are spare.
+func (m *DT1) UnmarshalBinary(b []byte) error {
+	d, err := newDecoder(b, MsgTypeDT1)
 	if err != nil {
 		return err
 	}
-	offset += n
-	n, err = d.SegmentingReassembling.Write(b[offset:])
+	var v DT1
+	if err := d.fixedParam("destination local reference", 3, &v.DestinationLocalReference); err != nil {
+		return err
+	}
+	sr, err := d.fixed("segmenting/reassembling", 1)
 	if err != nil {
 		return err
 	}
-	offset += n
-	b[offset] = d.ptr1
-	offset++
-	_, err = d.Data.Write(b[offset:])
-	return err
-}
-
-// ParseDT1 decodes given byte sequence as a SCCP DT1.
-func ParseDT1(b []byte) (*DT1, error) {
-	d := &DT1{}
-	if err := d.UnmarshalBinary(b); err != nil {
-		return nil, err
-	}
-	return d, nil
-}
-
-// UnmarshalBinary sets the values retrieved from byte sequence in a SCCP DT1.
-func (d *DT1) UnmarshalBinary(b []byte) error {
-	l := len(b)
-	if l < 7 {
-		return io.ErrUnexpectedEOF
-	}
-	d.Type = MsgType(b[0])
-	offset := 1
-	var n int
-	var err error
-	d.DestinationLocalReference, n, err = params.ParseDestinationLocalReference(b[offset:])
-	if err != nil {
+	v.MoreData = sr[0]&1 != 0
+	if err := d.pointers(1, 1); err != nil {
 		return err
 	}
-	offset += n
-	d.SegmentingReassembling, n, err = params.ParseSegmentingReassembling(b[offset:])
-	if err != nil {
+	if v.Data, err = d.variableData(0, "data"); err != nil {
 		return err
 	}
-	offset += n
-	d.ptr1 = b[offset]
-	offsetPtr1 := 5 + int(d.ptr1)
-	if l < offsetPtr1+1 {
-		return io.ErrUnexpectedEOF
-	}
-	d.Data, _, err = params.ParseData(b[offsetPtr1:])
-	return err
+	*m = v
+	return nil
 }
 
-// MarshalLen returns the serial length.
-func (d *DT1) MarshalLen() int { return 6 + d.Data.MarshalLen() }
-
-// String returns the DT1 values in human readable format.
-func (d *DT1) String() string {
-	return fmt.Sprintf("%s: {DestinationLocalReference: %s, SegmentingReassembling: %s, Data: %s}", d.Type, d.DestinationLocalReference, d.SegmentingReassembling, d.Data)
+// String returns the message in a human readable form.
+func (m *DT1) String() string {
+	return fmt.Sprintf("DT1{DestinationLocalReference: %#06x, MoreData: %t, Data: %x}",
+		uint32(m.DestinationLocalReference), m.MoreData, m.Data)
 }
 
-// MessageType returns the Message Type in int.
-func (d *DT1) MessageType() MsgType { return MsgTypeDT1 }
-
-// MessageTypeName returns the Message Type in string.
-func (d *DT1) MessageTypeName() string { return d.MessageType().String() }
-
-// DT2 represents an SCCP Data Form 2 message; see ITU-T Q.713 (03/01), section 4.8.
+// DT2 is the data form 2 message, ITU-T Q.713 (03/01) §4.8, Table 9.
 type DT2 struct {
-	Type                      MsgType
-	DestinationLocalReference *params.LocalReference
-	SequencingSegmenting      *params.SequencingSegmenting
-	Data                      *params.Data
-
-	ptr1 uint8
+	DestinationLocalReference params.LocalReference
+	SequencingSegmenting      params.SequencingSegmenting
+	// Data is 1 to 255 octets (§3.16).
+	Data []byte
 }
 
-// NewDT2 creates a new DT2.
-func NewDT2(dst uint32, snd, rcv uint8, moreData bool, data []byte) *DT2 {
-	return &DT2{
-		Type:                      MsgTypeDT2,
-		DestinationLocalReference: params.NewDestinationLocalReference(dst),
-		SequencingSegmenting:      params.NewSequencingSegmenting(snd, rcv, moreData),
-		Data:                      params.NewData(data),
-		ptr1:                      1,
-	}
+// MessageType returns MsgTypeDT2.
+func (*DT2) MessageType() MsgType { return MsgTypeDT2 }
+
+// MarshalBinary encodes the message; see Message.
+func (m *DT2) MarshalBinary() ([]byte, error) { return marshalDefault(m) }
+
+// AppendBinary appends the encoded message to b; see Message.
+func (m *DT2) AppendBinary(b []byte) ([]byte, error) { return appendDefault(b, m) }
+
+func (m *DT2) appendMessage(b []byte) ([]byte, error) {
+	e := newEncoder(b, MsgTypeDT2)
+	e.fixed("destination local reference", m.DestinationLocalReference)
+	e.fixed("sequencing/segmenting", m.SequencingSegmenting)
+	e.pointers(1, 1, false)
+	e.data(0, "data", m.Data, maxData)
+	return e.finish()
 }
 
-// MarshalBinary returns the byte sequence generated from a DT2 instance.
-func (d *DT2) MarshalBinary() ([]byte, error) {
-	b := make([]byte, d.MarshalLen())
-	if err := d.MarshalTo(b); err != nil {
-		return nil, err
-	}
-	return b, nil
-}
-
-// MarshalTo puts the byte sequence in the byte array given as b.
-func (d *DT2) MarshalTo(b []byte) error {
-	if len(b) < 7 {
-		return io.ErrUnexpectedEOF
-	}
-	b[0] = uint8(d.Type)
-	offset := 1
-	n, err := d.DestinationLocalReference.Write(b[offset:])
+// UnmarshalBinary decodes a DT2; see Message.
+func (m *DT2) UnmarshalBinary(b []byte) error {
+	d, err := newDecoder(b, MsgTypeDT2)
 	if err != nil {
 		return err
 	}
-	offset += n
-	n, err = d.SequencingSegmenting.Write(b[offset:])
-	if err != nil {
+	var v DT2
+	if err := d.fixedParam("destination local reference", 3, &v.DestinationLocalReference); err != nil {
 		return err
 	}
-	offset += n
-	b[offset] = d.ptr1
-	offset++
-	_, err = d.Data.Write(b[offset:])
-	return err
-}
-
-// ParseDT2 decodes given byte sequence as a SCCP DT2.
-func ParseDT2(b []byte) (*DT2, error) {
-	d := &DT2{}
-	if err := d.UnmarshalBinary(b); err != nil {
-		return nil, err
-	}
-	return d, nil
-}
-
-// UnmarshalBinary sets the values retrieved from byte sequence in a SCCP DT2.
-func (d *DT2) UnmarshalBinary(b []byte) error {
-	l := len(b)
-	if l < 8 {
-		return io.ErrUnexpectedEOF
-	}
-	d.Type = MsgType(b[0])
-	offset := 1
-	var n int
-	var err error
-	d.DestinationLocalReference, n, err = params.ParseDestinationLocalReference(b[offset:])
-	if err != nil {
+	if err := d.fixedParam("sequencing/segmenting", 2, &v.SequencingSegmenting); err != nil {
 		return err
 	}
-	offset += n
-	d.SequencingSegmenting, n, err = params.ParseSequencingSegmenting(b[offset:])
-	if err != nil {
+	if err := d.pointers(1, 1); err != nil {
 		return err
 	}
-	offset += n
-	d.ptr1 = b[offset]
-	offsetPtr1 := 6 + int(d.ptr1)
-	if l < offsetPtr1+1 {
-		return io.ErrUnexpectedEOF
+	if v.Data, err = d.variableData(0, "data"); err != nil {
+		return err
 	}
-	d.Data, _, err = params.ParseData(b[offsetPtr1:])
-	return err
+	*m = v
+	return nil
 }
 
-// MarshalLen returns the serial length.
-func (d *DT2) MarshalLen() int { return 7 + d.Data.MarshalLen() }
-
-// String returns the DT2 values in human readable format.
-func (d *DT2) String() string {
-	return fmt.Sprintf("%s: {DestinationLocalReference: %s, SequencingSegmenting: %s, Data: %s}", d.Type, d.DestinationLocalReference, d.SequencingSegmenting, d.Data)
+// String returns the message in a human readable form.
+func (m *DT2) String() string {
+	return fmt.Sprintf("DT2{DestinationLocalReference: %#06x, SequencingSegmenting: %s, Data: %x}",
+		uint32(m.DestinationLocalReference), m.SequencingSegmenting, m.Data)
 }
 
-// MessageType returns the Message Type in int.
-func (d *DT2) MessageType() MsgType { return MsgTypeDT2 }
-
-// MessageTypeName returns the Message Type in string.
-func (d *DT2) MessageTypeName() string { return d.MessageType().String() }
-
-// AK represents an SCCP Data Acknowledgement message; see ITU-T Q.713 (03/01), section 4.9.
+// AK is the data acknowledgement message, ITU-T Q.713 (03/01) §4.9, Table 10.
 type AK struct {
-	Type                      MsgType
-	DestinationLocalReference *params.LocalReference
-	ReceiveSequenceNumber     *params.ReceiveSequenceNumber
-	Credit                    *params.Credit
+	DestinationLocalReference params.LocalReference
+	// ReceiveSequenceNumber is P(R), 0 to 127, in bits 8-2 of the receive
+	// sequence number parameter (§3.8).
+	ReceiveSequenceNumber uint8
+	Credit                params.Credit
 }
 
-// NewAK creates a new AK.
-func NewAK(dst uint32, rcv, credit uint8) *AK {
-	return &AK{
-		Type:                      MsgTypeAK,
-		DestinationLocalReference: params.NewDestinationLocalReference(dst),
-		ReceiveSequenceNumber:     params.NewReceiveSequenceNumber(rcv),
-		Credit:                    params.NewCredit(credit),
+// MessageType returns MsgTypeAK.
+func (*AK) MessageType() MsgType { return MsgTypeAK }
+
+// MarshalBinary encodes the message; see Message.
+func (m *AK) MarshalBinary() ([]byte, error) { return marshalDefault(m) }
+
+// AppendBinary appends the encoded message to b; see Message.
+func (m *AK) AppendBinary(b []byte) ([]byte, error) { return appendDefault(b, m) }
+
+func (m *AK) appendMessage(b []byte) ([]byte, error) {
+	e := newEncoder(b, MsgTypeAK)
+	e.fixed("destination local reference", m.DestinationLocalReference)
+	if m.ReceiveSequenceNumber > params.MaxSequenceNumber {
+		e.invalid("receive sequence number %d exceeds %d", m.ReceiveSequenceNumber, params.MaxSequenceNumber)
 	}
+	e.octet(m.ReceiveSequenceNumber << 1)
+	e.fixed("credit", m.Credit)
+	return e.finish()
 }
 
-// MarshalBinary returns the byte sequence generated from an AK instance.
-func (a *AK) MarshalBinary() ([]byte, error) {
-	b := make([]byte, a.MarshalLen())
-	if err := a.MarshalTo(b); err != nil {
-		return nil, err
-	}
-	return b, nil
-}
-
-// MarshalTo puts the byte sequence in the byte array given as b.
-func (a *AK) MarshalTo(b []byte) error {
-	if len(b) < a.MarshalLen() {
-		return io.ErrUnexpectedEOF
-	}
-	b[0] = uint8(a.Type)
-	offset := 1
-	n, err := a.DestinationLocalReference.Write(b[offset:])
+// UnmarshalBinary decodes an AK; see Message. Bit 1 of the receive sequence
+// number parameter is spare.
+func (m *AK) UnmarshalBinary(b []byte) error {
+	d, err := newDecoder(b, MsgTypeAK)
 	if err != nil {
 		return err
 	}
-	offset += n
-	n, err = a.ReceiveSequenceNumber.Write(b[offset:])
+	var v AK
+	if err := d.fixedParam("destination local reference", 3, &v.DestinationLocalReference); err != nil {
+		return err
+	}
+	pr, err := d.fixed("receive sequence number", 1)
 	if err != nil {
 		return err
 	}
-	offset += n
-	_, err = a.Credit.Write(b[offset:])
-	return err
-}
-
-// ParseAK decodes given byte sequence as a SCCP AK.
-func ParseAK(b []byte) (*AK, error) {
-	a := &AK{}
-	if err := a.UnmarshalBinary(b); err != nil {
-		return nil, err
-	}
-	return a, nil
-}
-
-// UnmarshalBinary sets the values retrieved from byte sequence in a SCCP AK.
-func (a *AK) UnmarshalBinary(b []byte) error {
-	if len(b) < 6 {
-		return io.ErrUnexpectedEOF
-	}
-	a.Type = MsgType(b[0])
-	offset := 1
-	var n int
-	var err error
-	a.DestinationLocalReference, n, err = params.ParseDestinationLocalReference(b[offset:])
-	if err != nil {
+	v.ReceiveSequenceNumber = pr[0] >> 1
+	if err := d.fixedParam("credit", 1, &v.Credit); err != nil {
 		return err
 	}
-	offset += n
-	a.ReceiveSequenceNumber, n, err = params.ParseReceiveSequenceNumber(b[offset:])
-	if err != nil {
-		return err
-	}
-	offset += n
-	a.Credit, _, err = params.ParseCredit(b[offset:])
-	return err
+	*m = v
+	return nil
 }
 
-// MarshalLen returns the serial length.
-func (a *AK) MarshalLen() int { return 6 }
-
-// String returns the AK values in human readable format.
-func (a *AK) String() string {
-	return fmt.Sprintf("%s: {DestinationLocalReference: %s, ReceiveSequenceNumber: %s, Credit: %s}", a.Type, a.DestinationLocalReference, a.ReceiveSequenceNumber, a.Credit)
+// String returns the message in a human readable form.
+func (m *AK) String() string {
+	return fmt.Sprintf("AK{DestinationLocalReference: %#06x, P(R): %d, Credit: %d}",
+		uint32(m.DestinationLocalReference), m.ReceiveSequenceNumber, m.Credit)
 }
 
-// MessageType returns the Message Type in int.
-func (a *AK) MessageType() MsgType { return MsgTypeAK }
-
-// MessageTypeName returns the Message Type in string.
-func (a *AK) MessageTypeName() string { return a.MessageType().String() }
-
-// ED represents an SCCP Expedited Data message; see ITU-T Q.713 (03/01), section 4.12.
+// ED is the expedited data message, ITU-T Q.713 (03/01) §4.12, Table 13.
 type ED struct {
-	Type                      MsgType
-	DestinationLocalReference *params.LocalReference
-	Data                      *params.Data
-
-	ptr1 uint8
+	DestinationLocalReference params.LocalReference
+	// Data is 1 to 32 octets.
+	Data []byte
 }
 
-// NewED creates a new ED.
-func NewED(dst uint32, data []byte) *ED {
-	return &ED{
-		Type:                      MsgTypeED,
-		DestinationLocalReference: params.NewDestinationLocalReference(dst),
-		Data:                      params.NewData(data),
-		ptr1:                      1,
-	}
+// MessageType returns MsgTypeED.
+func (*ED) MessageType() MsgType { return MsgTypeED }
+
+// MarshalBinary encodes the message; see Message.
+func (m *ED) MarshalBinary() ([]byte, error) { return marshalDefault(m) }
+
+// AppendBinary appends the encoded message to b; see Message.
+func (m *ED) AppendBinary(b []byte) ([]byte, error) { return appendDefault(b, m) }
+
+func (m *ED) appendMessage(b []byte) ([]byte, error) {
+	e := newEncoder(b, MsgTypeED)
+	e.fixed("destination local reference", m.DestinationLocalReference)
+	e.pointers(1, 1, false)
+	e.data(0, "data", m.Data, maxExpeditedData)
+	return e.finish()
 }
 
-// MarshalBinary returns the byte sequence generated from an ED instance.
-func (e *ED) MarshalBinary() ([]byte, error) {
-	b := make([]byte, e.MarshalLen())
-	if err := e.MarshalTo(b); err != nil {
-		return nil, err
-	}
-	return b, nil
-}
-
-// MarshalTo puts the byte sequence in the byte array given as b.
-func (e *ED) MarshalTo(b []byte) error {
-	if len(b) < 5 {
-		return io.ErrUnexpectedEOF
-	}
-	b[0] = uint8(e.Type)
-	offset := 1
-	n, err := e.DestinationLocalReference.Write(b[offset:])
+// UnmarshalBinary decodes an ED; see Message.
+func (m *ED) UnmarshalBinary(b []byte) error {
+	d, err := newDecoder(b, MsgTypeED)
 	if err != nil {
 		return err
 	}
-	offset += n
-	b[offset] = e.ptr1
-	offset++
-	_, err = e.Data.Write(b[offset:])
-	return err
-}
-
-// ParseED decodes given byte sequence as a SCCP ED.
-func ParseED(b []byte) (*ED, error) {
-	e := &ED{}
-	if err := e.UnmarshalBinary(b); err != nil {
-		return nil, err
-	}
-	return e, nil
-}
-
-// UnmarshalBinary sets the values retrieved from byte sequence in a SCCP ED.
-func (e *ED) UnmarshalBinary(b []byte) error {
-	l := len(b)
-	if l < 6 {
-		return io.ErrUnexpectedEOF
-	}
-	e.Type = MsgType(b[0])
-	offset := 1
-	var n int
-	var err error
-	e.DestinationLocalReference, n, err = params.ParseDestinationLocalReference(b[offset:])
-	if err != nil {
+	var v ED
+	if err := d.fixedParam("destination local reference", 3, &v.DestinationLocalReference); err != nil {
 		return err
 	}
-	offset += n
-	e.ptr1 = b[offset]
-	offsetPtr1 := 4 + int(e.ptr1)
-	if l < offsetPtr1+1 {
-		return io.ErrUnexpectedEOF
+	if err := d.pointers(1, 1); err != nil {
+		return err
 	}
-	e.Data, _, err = params.ParseData(b[offsetPtr1:])
-	return err
+	if v.Data, err = d.variableData(0, "data"); err != nil {
+		return err
+	}
+	*m = v
+	return nil
 }
 
-// MarshalLen returns the serial length.
-func (e *ED) MarshalLen() int { return 5 + e.Data.MarshalLen() }
-
-// String returns the ED values in human readable format.
-func (e *ED) String() string {
-	return fmt.Sprintf("%s: {DestinationLocalReference: %s, Data: %s}", e.Type, e.DestinationLocalReference, e.Data)
+// String returns the message in a human readable form.
+func (m *ED) String() string {
+	return fmt.Sprintf("ED{DestinationLocalReference: %#06x, Data: %x}", uint32(m.DestinationLocalReference), m.Data)
 }
 
-// MessageType returns the Message Type in int.
-func (e *ED) MessageType() MsgType { return MsgTypeED }
-
-// MessageTypeName returns the Message Type in string.
-func (e *ED) MessageTypeName() string { return e.MessageType().String() }
-
-// EA represents an SCCP Expedited Data Acknowledgement message; see ITU-T Q.713 (03/01), section 4.13.
+// EA is the expedited data acknowledgement message, ITU-T Q.713 (03/01) §4.13,
+// Table 14.
 type EA struct {
-	Type                      MsgType
-	DestinationLocalReference *params.LocalReference
+	DestinationLocalReference params.LocalReference
 }
 
-// NewEA creates a new EA.
-func NewEA(dst uint32) *EA {
-	return &EA{
-		Type:                      MsgTypeEA,
-		DestinationLocalReference: params.NewDestinationLocalReference(dst),
+// MessageType returns MsgTypeEA.
+func (*EA) MessageType() MsgType { return MsgTypeEA }
+
+// MarshalBinary encodes the message; see Message.
+func (m *EA) MarshalBinary() ([]byte, error) { return marshalDefault(m) }
+
+// AppendBinary appends the encoded message to b; see Message.
+func (m *EA) AppendBinary(b []byte) ([]byte, error) { return appendDefault(b, m) }
+
+func (m *EA) appendMessage(b []byte) ([]byte, error) {
+	e := newEncoder(b, MsgTypeEA)
+	e.fixed("destination local reference", m.DestinationLocalReference)
+	return e.finish()
+}
+
+// UnmarshalBinary decodes an EA; see Message.
+func (m *EA) UnmarshalBinary(b []byte) error {
+	d, err := newDecoder(b, MsgTypeEA)
+	if err != nil {
+		return err
 	}
-}
-
-// MarshalBinary returns the byte sequence generated from an EA instance.
-func (e *EA) MarshalBinary() ([]byte, error) {
-	b := make([]byte, e.MarshalLen())
-	if err := e.MarshalTo(b); err != nil {
-		return nil, err
+	var v EA
+	if err := d.fixedParam("destination local reference", 3, &v.DestinationLocalReference); err != nil {
+		return err
 	}
-	return b, nil
+	*m = v
+	return nil
 }
 
-// MarshalTo puts the byte sequence in the byte array given as b.
-func (e *EA) MarshalTo(b []byte) error {
-	if len(b) < e.MarshalLen() {
-		return io.ErrUnexpectedEOF
-	}
-	b[0] = uint8(e.Type)
-	_, err := e.DestinationLocalReference.Write(b[1:])
-	return err
+// String returns the message in a human readable form.
+func (m *EA) String() string {
+	return fmt.Sprintf("EA{DestinationLocalReference: %#06x}", uint32(m.DestinationLocalReference))
 }
 
-// ParseEA decodes given byte sequence as a SCCP EA.
-func ParseEA(b []byte) (*EA, error) {
-	e := &EA{}
-	if err := e.UnmarshalBinary(b); err != nil {
-		return nil, err
-	}
-	return e, nil
-}
-
-// UnmarshalBinary sets the values retrieved from byte sequence in a SCCP EA.
-func (e *EA) UnmarshalBinary(b []byte) error {
-	if len(b) < 4 {
-		return io.ErrUnexpectedEOF
-	}
-	e.Type = MsgType(b[0])
-	var err error
-	e.DestinationLocalReference, _, err = params.ParseDestinationLocalReference(b[1:])
-	return err
-}
-
-// MarshalLen returns the serial length.
-func (e *EA) MarshalLen() int { return 4 }
-
-// String returns the EA values in human readable format.
-func (e *EA) String() string {
-	return fmt.Sprintf("%s: {DestinationLocalReference: %s}", e.Type, e.DestinationLocalReference)
-}
-
-// MessageType returns the Message Type in int.
-func (e *EA) MessageType() MsgType { return MsgTypeEA }
-
-// MessageTypeName returns the Message Type in string.
-func (e *EA) MessageTypeName() string { return e.MessageType().String() }
-
-// RSR represents an SCCP Reset Request message; see ITU-T Q.713 (03/01), section 4.14.
+// RSR is the reset request message, ITU-T Q.713 (03/01) §4.14, Table 15. Its
+// pointer to the optional part allows for optional parameters in the future;
+// none is defined, so any present is Unrecognized.
 type RSR struct {
-	Type                      MsgType
-	DestinationLocalReference *params.LocalReference
-	SourceLocalReference      *params.LocalReference
-	ResetCause                *params.ResetCause
-	OptionalParameters        []params.Parameter
-
-	ptr1 uint8
+	DestinationLocalReference params.LocalReference
+	SourceLocalReference      params.LocalReference
+	ResetCause                params.ResetCause
+	Unrecognized              []params.RawParameter
 }
 
-// NewRSR creates a new RSR.
-func NewRSR(dst, src uint32, cause params.ResetCauseValue, opts ...params.Parameter) *RSR {
-	r := &RSR{
-		Type:                      MsgTypeRSR,
-		DestinationLocalReference: params.NewDestinationLocalReference(dst),
-		SourceLocalReference:      params.NewSourceLocalReference(src),
-		ResetCause:                params.NewCause(cause),
-	}
-	if len(opts) > 0 {
-		r.ptr1 = 1
-		r.OptionalParameters = ensureOptionalEnd(opts)
-	}
-	return r
+// MessageType returns MsgTypeRSR.
+func (*RSR) MessageType() MsgType { return MsgTypeRSR }
+
+// MarshalBinary encodes the message; see Message.
+func (m *RSR) MarshalBinary() ([]byte, error) { return marshalDefault(m) }
+
+// AppendBinary appends the encoded message to b; see Message.
+func (m *RSR) AppendBinary(b []byte) ([]byte, error) { return appendDefault(b, m) }
+
+func (m *RSR) appendMessage(b []byte) ([]byte, error) {
+	e := newEncoder(b, MsgTypeRSR)
+	e.fixed("destination local reference", m.DestinationLocalReference)
+	e.fixed("source local reference", m.SourceLocalReference)
+	e.cause("reset cause", byte(m.ResetCause))
+	e.pointers(1, 1, true)
+	e.raws(m.Unrecognized, nil)
+	return e.finish()
 }
 
-// MarshalBinary returns the byte sequence generated from a RSR instance.
-func (r *RSR) MarshalBinary() ([]byte, error) {
-	b := make([]byte, r.MarshalLen())
-	if err := r.MarshalTo(b); err != nil {
-		return nil, err
-	}
-	return b, nil
-}
-
-// MarshalTo puts the byte sequence in the byte array given as b.
-func (r *RSR) MarshalTo(b []byte) error {
-	if len(b) < 9 {
-		return io.ErrUnexpectedEOF
-	}
-	b[0] = uint8(r.Type)
-	offset := 1
-	n, err := r.DestinationLocalReference.Write(b[offset:])
+// UnmarshalBinary decodes an RSR; see Message.
+func (m *RSR) UnmarshalBinary(b []byte) error {
+	d, err := newDecoder(b, MsgTypeRSR)
 	if err != nil {
 		return err
 	}
-	offset += n
-	n, err = r.SourceLocalReference.Write(b[offset:])
+	var v RSR
+	if err := d.fixedParam("destination local reference", 3, &v.DestinationLocalReference); err != nil {
+		return err
+	}
+	if err := d.fixedParam("source local reference", 3, &v.SourceLocalReference); err != nil {
+		return err
+	}
+	cause, err := d.fixed("reset cause", 1)
 	if err != nil {
 		return err
 	}
-	offset += n
-	n, err = r.ResetCause.Write(b[offset:])
-	if err != nil {
+	v.ResetCause = params.ResetCause(cause[0])
+	if err := d.pointers(1, 1); err != nil {
 		return err
 	}
-	offset += n
-	b[offset] = r.ptr1
-	offset++
-	if r.ptr1 == 0 {
-		return nil
-	}
-	return writeOptionalParameterList(b[offset:], r.OptionalParameters...)
-}
-
-// ParseRSR decodes given byte sequence as a SCCP RSR.
-func ParseRSR(b []byte) (*RSR, error) {
-	r := &RSR{}
-	if err := r.UnmarshalBinary(b); err != nil {
-		return nil, err
-	}
-	return r, nil
-}
-
-// UnmarshalBinary sets the values retrieved from byte sequence in a SCCP RSR.
-func (r *RSR) UnmarshalBinary(b []byte) error {
-	l := len(b)
-	if l < 9 {
-		return io.ErrUnexpectedEOF
-	}
-	r.Type = MsgType(b[0])
-	offset := 1
-	var n int
-	var err error
-	r.DestinationLocalReference, n, err = params.ParseDestinationLocalReference(b[offset:])
-	if err != nil {
+	if v.Unrecognized, err = d.optional(0, nil); err != nil {
 		return err
 	}
-	offset += n
-	r.SourceLocalReference, n, err = params.ParseSourceLocalReference(b[offset:])
-	if err != nil {
-		return err
-	}
-	offset += n
-	r.ResetCause, n, err = params.ParseResetCause(b[offset:])
-	if err != nil {
-		return err
-	}
-	offset += n
-	r.ptr1 = b[offset]
-	if r.ptr1 == 0 {
-		return nil
-	}
-	offsetPtr1 := 8 + int(r.ptr1)
-	if l < offsetPtr1+1 {
-		return io.ErrUnexpectedEOF
-	}
-	r.OptionalParameters, _, err = params.ParseOptionalParameters(b[offsetPtr1:])
-	return err
+	*m = v
+	return nil
 }
 
-// MarshalLen returns the serial length.
-func (r *RSR) MarshalLen() int {
-	l := 9
-	if r.ptr1 != 0 {
-		l += optionalParameterListLen(r.OptionalParameters...)
-	}
-	return l
+// String returns the message in a human readable form.
+func (m *RSR) String() string {
+	return fmt.Sprintf("RSR{DestinationLocalReference: %#06x, SourceLocalReference: %#06x, ResetCause: %s%s}",
+		uint32(m.DestinationLocalReference), uint32(m.SourceLocalReference), m.ResetCause,
+		connectionOptionalString(nil, nil, nil, nil, nil, nil, m.Unrecognized))
 }
 
-// String returns the RSR values in human readable format.
-func (r *RSR) String() string {
-	return fmt.Sprintf("%s: {DestinationLocalReference: %s, SourceLocalReference: %s, ResetCause: %s, OptionalParameters: %v}",
-		r.Type, r.DestinationLocalReference, r.SourceLocalReference, r.ResetCause, r.OptionalParameters)
-}
-
-// MessageType returns the Message Type in int.
-func (r *RSR) MessageType() MsgType { return MsgTypeRSR }
-
-// MessageTypeName returns the Message Type in string.
-func (r *RSR) MessageTypeName() string { return r.MessageType().String() }
-
-// RSC represents an SCCP Reset Confirmation message; see ITU-T Q.713 (03/01), section 4.15.
+// RSC is the reset confirmation message, ITU-T Q.713 (03/01) §4.15, Table 16.
 type RSC struct {
-	Type                      MsgType
-	DestinationLocalReference *params.LocalReference
-	SourceLocalReference      *params.LocalReference
+	DestinationLocalReference params.LocalReference
+	SourceLocalReference      params.LocalReference
 }
 
-// NewRSC creates a new RSC.
-func NewRSC(dst, src uint32) *RSC {
-	return &RSC{
-		Type:                      MsgTypeRSC,
-		DestinationLocalReference: params.NewDestinationLocalReference(dst),
-		SourceLocalReference:      params.NewSourceLocalReference(src),
-	}
+// MessageType returns MsgTypeRSC.
+func (*RSC) MessageType() MsgType { return MsgTypeRSC }
+
+// MarshalBinary encodes the message; see Message.
+func (m *RSC) MarshalBinary() ([]byte, error) { return marshalDefault(m) }
+
+// AppendBinary appends the encoded message to b; see Message.
+func (m *RSC) AppendBinary(b []byte) ([]byte, error) { return appendDefault(b, m) }
+
+func (m *RSC) appendMessage(b []byte) ([]byte, error) {
+	e := newEncoder(b, MsgTypeRSC)
+	e.fixed("destination local reference", m.DestinationLocalReference)
+	e.fixed("source local reference", m.SourceLocalReference)
+	return e.finish()
 }
 
-// MarshalBinary returns the byte sequence generated from a RSC instance.
-func (r *RSC) MarshalBinary() ([]byte, error) {
-	b := make([]byte, r.MarshalLen())
-	if err := r.MarshalTo(b); err != nil {
-		return nil, err
-	}
-	return b, nil
-}
-
-// MarshalTo puts the byte sequence in the byte array given as b.
-func (r *RSC) MarshalTo(b []byte) error {
-	if len(b) < r.MarshalLen() {
-		return io.ErrUnexpectedEOF
-	}
-	b[0] = uint8(r.Type)
-	offset := 1
-	n, err := r.DestinationLocalReference.Write(b[offset:])
+// UnmarshalBinary decodes an RSC; see Message.
+func (m *RSC) UnmarshalBinary(b []byte) error {
+	d, err := newDecoder(b, MsgTypeRSC)
 	if err != nil {
 		return err
 	}
-	offset += n
-	_, err = r.SourceLocalReference.Write(b[offset:])
-	return err
-}
-
-// ParseRSC decodes given byte sequence as a SCCP RSC.
-func ParseRSC(b []byte) (*RSC, error) {
-	r := &RSC{}
-	if err := r.UnmarshalBinary(b); err != nil {
-		return nil, err
-	}
-	return r, nil
-}
-
-// UnmarshalBinary sets the values retrieved from byte sequence in a SCCP RSC.
-func (r *RSC) UnmarshalBinary(b []byte) error {
-	if len(b) < 7 {
-		return io.ErrUnexpectedEOF
-	}
-	r.Type = MsgType(b[0])
-	offset := 1
-	var n int
-	var err error
-	r.DestinationLocalReference, n, err = params.ParseDestinationLocalReference(b[offset:])
-	if err != nil {
+	var v RSC
+	if err := d.fixedParam("destination local reference", 3, &v.DestinationLocalReference); err != nil {
 		return err
 	}
-	offset += n
-	r.SourceLocalReference, _, err = params.ParseSourceLocalReference(b[offset:])
-	return err
+	if err := d.fixedParam("source local reference", 3, &v.SourceLocalReference); err != nil {
+		return err
+	}
+	*m = v
+	return nil
 }
 
-// MarshalLen returns the serial length.
-func (r *RSC) MarshalLen() int { return 7 }
-
-// String returns the RSC values in human readable format.
-func (r *RSC) String() string {
-	return fmt.Sprintf("%s: {DestinationLocalReference: %s, SourceLocalReference: %s}", r.Type, r.DestinationLocalReference, r.SourceLocalReference)
+// String returns the message in a human readable form.
+func (m *RSC) String() string {
+	return fmt.Sprintf("RSC{DestinationLocalReference: %#06x, SourceLocalReference: %#06x}",
+		uint32(m.DestinationLocalReference), uint32(m.SourceLocalReference))
 }
 
-// MessageType returns the Message Type in int.
-func (r *RSC) MessageType() MsgType { return MsgTypeRSC }
-
-// MessageTypeName returns the Message Type in string.
-func (r *RSC) MessageTypeName() string { return r.MessageType().String() }
-
-// ERR represents an SCCP Protocol Data Unit Error message; see ITU-T Q.713 (03/01), section 4.16.
+// ERR is the protocol data unit error message, ITU-T Q.713 (03/01) §4.16,
+// Table 17. Like RSR it has a pointer to an optional part with no defined
+// parameters.
 type ERR struct {
-	Type                      MsgType
-	DestinationLocalReference *params.LocalReference
-	ErrorCause                *params.ErrorCause
-	OptionalParameters        []params.Parameter
-
-	ptr1 uint8
+	DestinationLocalReference params.LocalReference
+	ErrorCause                params.ErrorCause
+	Unrecognized              []params.RawParameter
 }
 
-// NewERR creates a new ERR.
-func NewERR(dst uint32, cause params.ErrorCauseValue, opts ...params.Parameter) *ERR {
-	e := &ERR{
-		Type:                      MsgTypeERR,
-		DestinationLocalReference: params.NewDestinationLocalReference(dst),
-		ErrorCause:                params.NewCause(cause),
-	}
-	if len(opts) > 0 {
-		e.ptr1 = 1
-		e.OptionalParameters = ensureOptionalEnd(opts)
-	}
-	return e
+// MessageType returns MsgTypeERR.
+func (*ERR) MessageType() MsgType { return MsgTypeERR }
+
+// MarshalBinary encodes the message; see Message.
+func (m *ERR) MarshalBinary() ([]byte, error) { return marshalDefault(m) }
+
+// AppendBinary appends the encoded message to b; see Message.
+func (m *ERR) AppendBinary(b []byte) ([]byte, error) { return appendDefault(b, m) }
+
+func (m *ERR) appendMessage(b []byte) ([]byte, error) {
+	e := newEncoder(b, MsgTypeERR)
+	e.fixed("destination local reference", m.DestinationLocalReference)
+	e.cause("error cause", byte(m.ErrorCause))
+	e.pointers(1, 1, true)
+	e.raws(m.Unrecognized, nil)
+	return e.finish()
 }
 
-// MarshalBinary returns the byte sequence generated from an ERR instance.
-func (e *ERR) MarshalBinary() ([]byte, error) {
-	b := make([]byte, e.MarshalLen())
-	if err := e.MarshalTo(b); err != nil {
-		return nil, err
-	}
-	return b, nil
-}
-
-// MarshalTo puts the byte sequence in the byte array given as b.
-func (e *ERR) MarshalTo(b []byte) error {
-	if len(b) < 6 {
-		return io.ErrUnexpectedEOF
-	}
-	b[0] = uint8(e.Type)
-	offset := 1
-	n, err := e.DestinationLocalReference.Write(b[offset:])
+// UnmarshalBinary decodes an ERR; see Message.
+func (m *ERR) UnmarshalBinary(b []byte) error {
+	d, err := newDecoder(b, MsgTypeERR)
 	if err != nil {
 		return err
 	}
-	offset += n
-	n, err = e.ErrorCause.Write(b[offset:])
+	var v ERR
+	if err := d.fixedParam("destination local reference", 3, &v.DestinationLocalReference); err != nil {
+		return err
+	}
+	cause, err := d.fixed("error cause", 1)
 	if err != nil {
 		return err
 	}
-	offset += n
-	b[offset] = e.ptr1
-	offset++
-	if e.ptr1 == 0 {
-		return nil
-	}
-	return writeOptionalParameterList(b[offset:], e.OptionalParameters...)
-}
-
-// ParseERR decodes given byte sequence as a SCCP ERR.
-func ParseERR(b []byte) (*ERR, error) {
-	e := &ERR{}
-	if err := e.UnmarshalBinary(b); err != nil {
-		return nil, err
-	}
-	return e, nil
-}
-
-// UnmarshalBinary sets the values retrieved from byte sequence in a SCCP ERR.
-func (e *ERR) UnmarshalBinary(b []byte) error {
-	l := len(b)
-	if l < 6 {
-		return io.ErrUnexpectedEOF
-	}
-	e.Type = MsgType(b[0])
-	offset := 1
-	var n int
-	var err error
-	e.DestinationLocalReference, n, err = params.ParseDestinationLocalReference(b[offset:])
-	if err != nil {
+	v.ErrorCause = params.ErrorCause(cause[0])
+	if err := d.pointers(1, 1); err != nil {
 		return err
 	}
-	offset += n
-	e.ErrorCause, n, err = params.ParseErrorCause(b[offset:])
-	if err != nil {
+	if v.Unrecognized, err = d.optional(0, nil); err != nil {
 		return err
 	}
-	offset += n
-	e.ptr1 = b[offset]
-	if e.ptr1 == 0 {
-		return nil
-	}
-	offsetPtr1 := 5 + int(e.ptr1)
-	if l < offsetPtr1+1 {
-		return io.ErrUnexpectedEOF
-	}
-	e.OptionalParameters, _, err = params.ParseOptionalParameters(b[offsetPtr1:])
-	return err
+	*m = v
+	return nil
 }
 
-// MarshalLen returns the serial length.
-func (e *ERR) MarshalLen() int {
-	l := 6
-	if e.ptr1 != 0 {
-		l += optionalParameterListLen(e.OptionalParameters...)
-	}
-	return l
+// String returns the message in a human readable form.
+func (m *ERR) String() string {
+	return fmt.Sprintf("ERR{DestinationLocalReference: %#06x, ErrorCause: %s%s}",
+		uint32(m.DestinationLocalReference), m.ErrorCause,
+		connectionOptionalString(nil, nil, nil, nil, nil, nil, m.Unrecognized))
 }
 
-// String returns the ERR values in human readable format.
-func (e *ERR) String() string {
-	return fmt.Sprintf("%s: {DestinationLocalReference: %s, ErrorCause: %s, OptionalParameters: %v}", e.Type, e.DestinationLocalReference, e.ErrorCause, e.OptionalParameters)
-}
-
-// MessageType returns the Message Type in int.
-func (e *ERR) MessageType() MsgType { return MsgTypeERR }
-
-// MessageTypeName returns the Message Type in string.
-func (e *ERR) MessageTypeName() string { return e.MessageType().String() }
-
-// IT represents an SCCP Inactivity Test message; see ITU-T Q.713 (03/01), section 4.17.
+// IT is the inactivity test message, ITU-T Q.713 (03/01) §4.17, Table 18.
 type IT struct {
-	Type                      MsgType
-	DestinationLocalReference *params.LocalReference
-	SourceLocalReference      *params.LocalReference
-	ProtocolClass             *params.ProtocolClass
-	SequencingSegmenting      *params.SequencingSegmenting
-	Credit                    *params.Credit
+	DestinationLocalReference params.LocalReference
+	SourceLocalReference      params.LocalReference
+	// ProtocolClass is class 2 or 3.
+	ProtocolClass params.ProtocolClass
+	// SequencingSegmenting and Credit reflect the last DT2 or AK sent; they
+	// are ignored for protocol class 2 (Table 18 Note).
+	SequencingSegmenting params.SequencingSegmenting
+	Credit               params.Credit
 }
 
-// NewIT creates a new IT.
-func NewIT(dst, src uint32, pcls int, retOnErr bool, snd, rcv uint8, moreData bool, credit uint8) *IT {
-	return &IT{
-		Type:                      MsgTypeIT,
-		DestinationLocalReference: params.NewDestinationLocalReference(dst),
-		SourceLocalReference:      params.NewSourceLocalReference(src),
-		ProtocolClass:             params.NewProtocolClass(pcls, retOnErr),
-		SequencingSegmenting:      params.NewSequencingSegmenting(snd, rcv, moreData),
-		Credit:                    params.NewCredit(credit),
-	}
+// MessageType returns MsgTypeIT.
+func (*IT) MessageType() MsgType { return MsgTypeIT }
+
+// MarshalBinary encodes the message; see Message.
+func (m *IT) MarshalBinary() ([]byte, error) { return marshalDefault(m) }
+
+// AppendBinary appends the encoded message to b; see Message.
+func (m *IT) AppendBinary(b []byte) ([]byte, error) { return appendDefault(b, m) }
+
+func (m *IT) appendMessage(b []byte) ([]byte, error) {
+	e := newEncoder(b, MsgTypeIT)
+	e.fixed("destination local reference", m.DestinationLocalReference)
+	e.fixed("source local reference", m.SourceLocalReference)
+	e.connectionOrientedClass(m.ProtocolClass)
+	e.fixed("sequencing/segmenting", m.SequencingSegmenting)
+	e.fixed("credit", m.Credit)
+	return e.finish()
 }
 
-// MarshalBinary returns the byte sequence generated from an IT instance.
-func (i *IT) MarshalBinary() ([]byte, error) {
-	b := make([]byte, i.MarshalLen())
-	if err := i.MarshalTo(b); err != nil {
-		return nil, err
-	}
-	return b, nil
-}
-
-// MarshalTo puts the byte sequence in the byte array given as b.
-func (i *IT) MarshalTo(b []byte) error {
-	if len(b) < i.MarshalLen() {
-		return io.ErrUnexpectedEOF
-	}
-	b[0] = uint8(i.Type)
-	offset := 1
-	n, err := i.DestinationLocalReference.Write(b[offset:])
+// UnmarshalBinary decodes an IT; see Message.
+func (m *IT) UnmarshalBinary(b []byte) error {
+	d, err := newDecoder(b, MsgTypeIT)
 	if err != nil {
 		return err
 	}
-	offset += n
-	n, err = i.SourceLocalReference.Write(b[offset:])
-	if err != nil {
+	var v IT
+	if err := d.fixedParam("destination local reference", 3, &v.DestinationLocalReference); err != nil {
 		return err
 	}
-	offset += n
-	n, err = i.ProtocolClass.Write(b[offset:])
-	if err != nil {
+	if err := d.fixedParam("source local reference", 3, &v.SourceLocalReference); err != nil {
 		return err
 	}
-	offset += n
-	n, err = i.SequencingSegmenting.Write(b[offset:])
-	if err != nil {
+	if err := d.fixedParam("protocol class", 1, &v.ProtocolClass); err != nil {
 		return err
 	}
-	offset += n
-	_, err = i.Credit.Write(b[offset:])
-	return err
-}
-
-// ParseIT decodes given byte sequence as a SCCP IT.
-func ParseIT(b []byte) (*IT, error) {
-	i := &IT{}
-	if err := i.UnmarshalBinary(b); err != nil {
-		return nil, err
-	}
-	return i, nil
-}
-
-// UnmarshalBinary sets the values retrieved from byte sequence in a SCCP IT.
-func (i *IT) UnmarshalBinary(b []byte) error {
-	if len(b) < 11 {
-		return io.ErrUnexpectedEOF
-	}
-	i.Type = MsgType(b[0])
-	offset := 1
-	var n int
-	var err error
-	i.DestinationLocalReference, n, err = params.ParseDestinationLocalReference(b[offset:])
-	if err != nil {
+	if err := d.fixedParam("sequencing/segmenting", 2, &v.SequencingSegmenting); err != nil {
 		return err
 	}
-	offset += n
-	i.SourceLocalReference, n, err = params.ParseSourceLocalReference(b[offset:])
-	if err != nil {
+	if err := d.fixedParam("credit", 1, &v.Credit); err != nil {
 		return err
 	}
-	offset += n
-	i.ProtocolClass, n, err = params.ParseProtocolClass(b[offset:])
-	if err != nil {
-		return err
-	}
-	offset += n
-	i.SequencingSegmenting, n, err = params.ParseSequencingSegmenting(b[offset:])
-	if err != nil {
-		return err
-	}
-	offset += n
-	i.Credit, _, err = params.ParseCredit(b[offset:])
-	return err
-}
-
-// MarshalLen returns the serial length.
-func (i *IT) MarshalLen() int { return 11 }
-
-// String returns the IT values in human readable format.
-func (i *IT) String() string {
-	return fmt.Sprintf("%s: {DestinationLocalReference: %s, SourceLocalReference: %s, ProtocolClass: %s, SequencingSegmenting: %s, Credit: %s}",
-		i.Type, i.DestinationLocalReference, i.SourceLocalReference, i.ProtocolClass, i.SequencingSegmenting, i.Credit)
-}
-
-// MessageType returns the Message Type in int.
-func (i *IT) MessageType() MsgType { return MsgTypeIT }
-
-// MessageTypeName returns the Message Type in string.
-func (i *IT) MessageTypeName() string { return i.MessageType().String() }
-
-func assignCROptionalParameters(messageName string, opts []params.Parameter, c *CR) {
-	for _, opt := range ensureOptionalEnd(opts) {
-		switch param := opt.(type) {
-		case *params.Credit:
-			c.Credit = param
-		case *params.PartyAddress:
-			if param.Code() == params.PCodeCallingPartyAddress {
-				c.CallingPartyAddress = param
-			} else {
-				logf("%s: unexpected party address parameter: %s", messageName, param.Code())
-			}
-		case *params.Data:
-			c.Data = param
-		case *params.HopCounter:
-			c.HopCounter = param
-		case *params.Importance:
-			c.Importance = param
-		case *params.EndOfOptionalParameters:
-			c.EndOfOptionalParameters = param
-		default:
-			logf("%s: unexpected parameter: %s", messageName, opt.Code())
-		}
-	}
-}
-
-func parseCROptionalParameters(b []byte, c *CR) error {
-	opts, _, err := params.ParseOptionalParameters(b)
-	if err != nil {
-		return err
-	}
-	for _, opt := range opts {
-		switch param := opt.(type) {
-		case *params.Credit:
-			c.Credit = param
-		case *params.PartyAddress:
-			if param.Code() != params.PCodeCallingPartyAddress {
-				return fmt.Errorf("CR: unexpected party address parameter: %s", param.Code())
-			}
-			c.CallingPartyAddress = param
-		case *params.Data:
-			c.Data = param
-		case *params.HopCounter:
-			c.HopCounter = param
-		case *params.Importance:
-			c.Importance = param
-		case *params.EndOfOptionalParameters:
-			c.EndOfOptionalParameters = param
-		default:
-			return fmt.Errorf("CR: unexpected parameter: %s", opt.Code())
-		}
-	}
+	*m = v
 	return nil
 }
 
-func assignCCOptionalParameters(messageName string, opts []params.Parameter, c *CC) {
-	for _, opt := range ensureOptionalEnd(opts) {
-		switch param := opt.(type) {
-		case *params.Credit:
-			c.Credit = param
-		case *params.PartyAddress:
-			if param.Code() == params.PCodeCalledPartyAddress {
-				c.CalledPartyAddress = param
-			} else {
-				logf("%s: unexpected party address parameter: %s", messageName, param.Code())
-			}
-		case *params.Data:
-			c.Data = param
-		case *params.Importance:
-			c.Importance = param
-		case *params.EndOfOptionalParameters:
-			c.EndOfOptionalParameters = param
-		default:
-			logf("%s: unexpected parameter: %s", messageName, opt.Code())
-		}
-	}
+// String returns the message in a human readable form.
+func (m *IT) String() string {
+	return fmt.Sprintf("IT{DestinationLocalReference: %#06x, SourceLocalReference: %#06x, ProtocolClass: %s, SequencingSegmenting: %s, Credit: %d}",
+		uint32(m.DestinationLocalReference), uint32(m.SourceLocalReference), m.ProtocolClass, m.SequencingSegmenting, m.Credit)
 }
 
-func parseCCOptionalParameters(b []byte, c *CC) error {
-	opts, _, err := params.ParseOptionalParameters(b)
-	if err != nil {
-		return err
+// connectionOrientedClass appends a protocol class that must be
+// connection-oriented: CR, CC and IT exist for classes 2 and 3 only (ITU-T
+// Q.713 (03/01) Table 1).
+func (e *encoder) connectionOrientedClass(p params.ProtocolClass) {
+	if p.Class < 2 {
+		e.invalid("protocol class %d is not a connection-oriented class", p.Class)
+		return
 	}
-	for _, opt := range opts {
-		switch param := opt.(type) {
-		case *params.Credit:
-			c.Credit = param
-		case *params.PartyAddress:
-			if param.Code() != params.PCodeCalledPartyAddress {
-				return fmt.Errorf("CC: unexpected party address parameter: %s", param.Code())
-			}
-			c.CalledPartyAddress = param
-		case *params.Data:
-			c.Data = param
-		case *params.Importance:
-			c.Importance = param
-		case *params.EndOfOptionalParameters:
-			c.EndOfOptionalParameters = param
-		default:
-			return fmt.Errorf("CC: unexpected parameter: %s", opt.Code())
-		}
-	}
-	return nil
+	e.fixed("protocol class", p)
 }
 
-func assignCREFOptionalParameters(messageName string, opts []params.Parameter, c *CREF) {
-	for _, opt := range ensureOptionalEnd(opts) {
-		switch param := opt.(type) {
-		case *params.PartyAddress:
-			if param.Code() == params.PCodeCalledPartyAddress {
-				c.CalledPartyAddress = param
-			} else {
-				logf("%s: unexpected party address parameter: %s", messageName, param.Code())
-			}
-		case *params.Data:
-			c.Data = param
-		case *params.Importance:
-			c.Importance = param
-		case *params.EndOfOptionalParameters:
-			c.EndOfOptionalParameters = param
-		default:
-			logf("%s: unexpected parameter: %s", messageName, opt.Code())
-		}
+func moreDataOctet(more bool) byte {
+	if more {
+		return 1
 	}
+	return 0
 }
 
-func parseCREFOptionalParameters(b []byte, c *CREF) error {
-	opts, _, err := params.ParseOptionalParameters(b)
-	if err != nil {
-		return err
+func connectionOptionalString(credit *params.Credit, calling, called *params.PartyAddress, data []byte, hop *params.HopCounter, imp *params.Importance, raw []params.RawParameter) string {
+	s := ""
+	if credit != nil {
+		s += fmt.Sprintf(", Credit: %d", *credit)
 	}
-	for _, opt := range opts {
-		switch param := opt.(type) {
-		case *params.PartyAddress:
-			if param.Code() != params.PCodeCalledPartyAddress {
-				return fmt.Errorf("CREF: unexpected party address parameter: %s", param.Code())
-			}
-			c.CalledPartyAddress = param
-		case *params.Data:
-			c.Data = param
-		case *params.Importance:
-			c.Importance = param
-		case *params.EndOfOptionalParameters:
-			c.EndOfOptionalParameters = param
-		default:
-			return fmt.Errorf("CREF: unexpected parameter: %s", opt.Code())
-		}
+	if calling != nil {
+		s += fmt.Sprintf(", CallingPartyAddress: %s", *calling)
 	}
-	return nil
-}
-
-func assignRLSDOptionalParameters(messageName string, opts []params.Parameter, r *RLSD) {
-	for _, opt := range ensureOptionalEnd(opts) {
-		switch param := opt.(type) {
-		case *params.Data:
-			r.Data = param
-		case *params.Importance:
-			r.Importance = param
-		case *params.EndOfOptionalParameters:
-			r.EndOfOptionalParameters = param
-		default:
-			logf("%s: unexpected parameter: %s", messageName, opt.Code())
-		}
+	if called != nil {
+		s += fmt.Sprintf(", CalledPartyAddress: %s", *called)
 	}
-}
-
-func parseRLSDOptionalParameters(b []byte, r *RLSD) error {
-	opts, _, err := params.ParseOptionalParameters(b)
-	if err != nil {
-		return err
+	if len(data) > 0 {
+		s += fmt.Sprintf(", Data: %x", data)
 	}
-	for _, opt := range opts {
-		switch param := opt.(type) {
-		case *params.Data:
-			r.Data = param
-		case *params.Importance:
-			r.Importance = param
-		case *params.EndOfOptionalParameters:
-			r.EndOfOptionalParameters = param
-		default:
-			return fmt.Errorf("RLSD: unexpected parameter: %s", opt.Code())
-		}
+	if hop != nil {
+		s += fmt.Sprintf(", HopCounter: %d", *hop)
 	}
-	return nil
-}
-
-func ensureOptionalEnd(opts []params.Parameter) []params.Parameter {
-	if len(opts) == 0 {
-		return nil
+	if imp != nil {
+		s += fmt.Sprintf(", Importance: %d", *imp)
 	}
-	out := make([]params.Parameter, 0, len(opts)+1)
-	out = append(out, opts...)
-	if out[len(out)-1].Code() != params.PCodeEndOfOptionalParameters {
-		out = append(out, params.NewEndOfOptionalParameters())
+	if len(raw) > 0 {
+		s += fmt.Sprintf(", Unrecognized: %v", raw)
 	}
-	return out
-}
-
-func writeOptionalParameterList(b []byte, opts ...params.Parameter) error {
-	offset := 0
-	for _, opt := range opts {
-		if opt == nil {
-			continue
-		}
-		n, err := opt.Write(b[offset:])
-		if err != nil {
-			return err
-		}
-		offset += n
-	}
-	return nil
-}
-
-func optionalParameterListLen(opts ...params.Parameter) int {
-	l := 0
-	for _, opt := range opts {
-		if opt != nil {
-			l += opt.MarshalLen()
-		}
-	}
-	return l
+	return s
 }
