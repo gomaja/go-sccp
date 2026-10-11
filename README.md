@@ -6,54 +6,51 @@
 [![License](https://img.shields.io/github/license/gomaja/go-sccp.svg)](https://github.com/gomaja/go-sccp/blob/main/LICENSE)
 
 `go-sccp` is a Go implementation of SCCP, the Signalling Connection Control
-Part used in SS7 and SIGTRAN stacks.
+Part of SS7 and SIGTRAN: the ITU-T Q.713 message codecs and an end-node ITU-T
+Q.714 procedure stack with connectionless segmentation and reassembly.
 
-The package currently provides complete ITU-T Q.713 message and parameter
-encoding/decoding, plus the first Q.714 connection-section procedure helpers.
-It is suitable for building, parsing, validating, and testing SCCP wire
-messages while the full procedure stack is being completed.
+The library performs no I/O and depends on no transport. The examples run it
+over M3UA with [go-m3ua](https://github.com/gomaja/go-m3ua) and
+[go-sctp](https://github.com/gomaja/go-sctp).
 
-## Status
-
-This module is pre-v1. Public APIs may still change while the Q.714 procedure
-layer is completed.
-
-Implemented:
-
-- ITU-T Q.713 (03/01) message codecs for all SCCP message types.
-- ITU-T Q.713 (03/01) parameter codecs for the full standard parameter set.
-- Strict parser coverage for short buffers and malformed optional parameter
-  lengths.
-- Fuzz targets for top-level message parsing and parameter parsing.
-- Initial ITU-T Q.714 (05/01) connection-section helpers for CC/CREF setup
-  outcomes, RLSD/RLC release handling, reference mismatch detection, frozen
-  reference state, class 2 DT1 data transfer, and class 3 DT2/AK sequence and
-  flow-control windows.
-- In-memory SCCP stack core for local subsystem registration, connectionless
-  N-UNITDATA delivery, UDTS/XUDTS/LUDTS return generation, N-NOTICE delivery,
-  and connection-oriented section lifecycle orchestration.
-- CI for build, tests, race tests, vet, static analysis, vulnerability checks,
-  portability, and security scanning.
-
-Remaining stack work:
-
-- Q.714 global title translation, relay routing, compatibility tests, message
-  type changes, segmentation, reassembly, and management procedure integration.
-- Q.714 freeze/guard timers and relay coupling for multi-section connections.
-- Q.714 class 3 reset, expedited data, inactivity testing, and timer behavior.
-- Q.714 connection-oriented segmentation/reassembly across multiple DT
-  messages.
-
-See [docs/standards.md](docs/standards.md) for the standards baseline, errata
-policy, open-source survey, and detailed compliance ledger.
-
-## Install
+## Installation
 
 ```sh
-go get github.com/gomaja/go-sccp
+go get github.com/gomaja/go-sccp@main
 ```
 
-## Message Encoding
+Track the `main` branch. Every version tagged so far is retracted, so ask for
+`@main` explicitly. The public API follows `main` and may change.
+
+## What it does
+
+- **Codecs for every SCCP message** of ITU-T Q.713 (03/01) Table 1 and every
+  parameter of Table 2, plus the SCMG messages of clause 5.
+- **Conservative encoding**: canonical layout, every length, pointer and field
+  range-checked — a value is never masked, wrapped or truncated — and the whole
+  message checked against a maximum size, 268 octets by default (the 272-octet
+  MTP-SDU of ITU-T Q.711 §7.1 minus the 4-octet routing label).
+- **Liberal decoding**: messages of any size, gaps, parameters out of pointer
+  order, unrecognised optional parameters (kept and re-encoded), a missing end of
+  optional parameters octet, any spare bits.
+- **Connectionless stack** (Q.714 §4): UDT or XUDT for short user data, up to 16
+  XUDT segments for user data up to 3952 octets, reassembly with T(reassembly),
+  duplicate and out-of-sequence detection and memory bounds, and the message
+  return procedure with the Q.713 §3.12 causes, once per failed message.
+- **Connection-oriented stack** (Q.714 §3), protocol class 2: establishment,
+  refusal, release with T(rel)/T(repeat rel)/T(int), frozen references,
+  inactivity control, M-bit segmentation and reassembly within memory bounds,
+  the Annex B action tables with the abnormal cases of the Annex C diagrams,
+  and a `MaintenanceIndication` when a release never completes.
+
+[docs/standards.md](docs/standards.md) lists every rule with its clause, and
+what is out of scope (global title translation beyond the final one at this
+node, relaying, SCCP management procedures, protocol class 3).
+
+## Messages
+
+Messages are structs with exported fields. Optional parameters are pointers,
+nil when absent.
 
 ```go
 package main
@@ -66,141 +63,116 @@ import (
 )
 
 func main() {
-	msg := sccp.NewUDT(
-		0,
-		true,
-		params.NewCalledPartyAddress(0x42, 0, 6, nil),
-		params.NewCallingPartyAddress(0x42, 0, 7, nil),
-		[]byte("payload"),
-	)
-
-	wire, err := msg.MarshalBinary()
+	gt, err := params.NewGlobalTitle4(0, params.NPISDNTelephony, params.NAIInternationalNumber, "447700900001")
 	if err != nil {
 		log.Fatal(err)
 	}
+	udt := &sccp.UDT{
+		ProtocolClass:       params.ProtocolClass{Class: 0, ReturnOnError: true},
+		CalledPartyAddress:  params.NewGlobalTitleAddress(gt, 6),
+		CallingPartyAddress: params.NewSSNAddress(147),
+		Data:                []byte{0x62, 0x03, 0x48, 0x01, 0x01},
+	}
+	wire, err := udt.MarshalBinary()
+	if err != nil {
+		log.Fatal(err) // e.g. sccp.ErrMessageTooLong above 268 octets
+	}
 
-	log.Printf("%x", wire)
+	m, err := sccp.ParseMessage(wire)
+	if err != nil {
+		log.Fatal(err)
+	}
+	log.Printf("%s", m)
 }
 ```
 
-## Message Parsing
+`MarshalOptions{MaxMessageSize: n}.Marshal(m)` encodes for another maximum, up
+to `sccp.MaxBroadbandMessageSize` (4091 octets) where every MTP-SAP is
+broadband, which long unitdata (LUDT) needs.
+
+## Stack
+
+A `Stack` takes the SCCP messages the MTP delivered, with their routing label,
+and returns what to send and what to deliver:
 
 ```go
-package main
+stack, err := sccp.NewStack(sccp.StackConfig{PointCode: 0x0101})
+if err != nil {
+	log.Fatal(err)
+}
+stack.RegisterSubsystem(147)
 
-import (
-	"log"
+// N-UNITDATA request: one UDT, or XUDT segments for long user data.
+res, err := stack.Unitdata(sccp.UnitdataRequest{
+	CalledPartyAddress:  params.NewGlobalTitleAddress(gt, 6),
+	CallingPartyAddress: params.NewSSNAddress(147),
+	ProtocolClass:       1,
+	ReturnOnError:       true,
+	Data:                tcapBegin,
+	DPC:                 0x0202,
+})
+if err != nil {
+	log.Fatal(err) // sccp.ErrInvalidRequest or sccp.ErrSegmentation
+}
+for _, tr := range res.Transfers {
+	send(tr.OPC, tr.DPC, tr.SLS, tr.Data) // MTP-TRANSFER request, e.g. M3UA DATA
+}
 
-	"github.com/gomaja/go-sccp"
-)
-
-func main() {
-	msg, err := sccp.ParseMessage([]byte{
-		0x09, 0x80, 0x03, 0x06, 0x09,
-		0x02, 0x42, 0x06,
-		0x02, 0x42, 0x07,
-		0x07, 'p', 'a', 'y', 'l', 'o', 'a', 'd',
-	})
-	if err != nil {
-		log.Fatal(err)
+// Every message from the MTP, with its routing label.
+res = stack.HandleTransfer(sccp.TransferIndication{
+	RoutingLabel: sccp.RoutingLabel{OPC: opc, DPC: dpc, SLS: sls},
+	Data:         payload,
+})
+for _, ind := range res.Indications {
+	switch ind := ind.(type) {
+	case *sccp.UnitdataIndication: // reassembled when it was segmented
+		deliver(ind.CalledPartyAddress.SSN, ind.Data)
+	case *sccp.NoticeIndication: // returned by the message return procedure
+		log.Printf("returned: %s", ind.ReasonForReturn)
+	case *sccp.MaintenanceIndication: // for the maintenance function
+		log.Printf("%s: %s", ind.MessageType, ind.Reason)
 	}
-
-	log.Printf("%s", msg.MessageTypeName())
 }
 ```
 
-## Connection-Section Procedures
+Timers run when the caller asks: call `HandleTimeout` when `NextTimeout` says
+one is due, or let `RunTimers` do it in a goroutine. The clock is injectable
+(`StackConfig.Now`), so tests drive every timer without sleeping.
 
-```go
-package main
+## Examples
 
-import (
-	"log"
+The [examples](examples) are a separate module that tracks the `main` branches
+of go-m3ua and go-sctp:
 
-	"github.com/gomaja/go-sccp"
-	"github.com/gomaja/go-sccp/params"
-)
+- `examples/sgp`: an M3UA SGP that passes every DATA message to a stack and
+  prints the N-UNITDATA indications, reassembled.
+- `examples/asp`: an M3UA ASP that sends one N-UNITDATA request through the
+  stack; its default user data is a TCAP Begin carrying a MAP
+  unstructuredSS-Request (network-initiated USSD).
 
-func main() {
-	section := sccp.NewPendingConnectionSection(0x010203, 3, 8)
-
-	confirm := sccp.NewCC(0x010203, 0x040506, 2, false)
-	if err := section.HandleConnectionConfirm(confirm); err != nil {
-		log.Fatal(err)
-	}
-
-	released, err := section.Release(params.ReleaseCauseSCCPUserOriginated)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	log.Printf("%s to %06x", released.MessageTypeName(), released.DestinationLocalReference.Uint32())
-}
+```sh
+cd examples
+go run ./sgp -addr 127.0.0.1:2905
+go run ./asp -addr 127.0.0.1:2905 -segmentation-threshold 160
 ```
 
-## Supported Messages
-
-| Message type | Abbreviation | Reference | Codec |
-| --- | --- | --- | --- |
-| Connection request | CR | ITU-T Q.713 (03/01) 4.2 | Yes |
-| Connection confirm | CC | ITU-T Q.713 (03/01) 4.3 | Yes |
-| Connection refused | CREF | ITU-T Q.713 (03/01) 4.4 | Yes |
-| Released | RLSD | ITU-T Q.713 (03/01) 4.5 | Yes |
-| Release complete | RLC | ITU-T Q.713 (03/01) 4.6 | Yes |
-| Data form 1 | DT1 | ITU-T Q.713 (03/01) 4.7 | Yes |
-| Data form 2 | DT2 | ITU-T Q.713 (03/01) 4.8 | Yes |
-| Data acknowledgement | AK | ITU-T Q.713 (03/01) 4.9 | Yes |
-| Unitdata | UDT | ITU-T Q.713 (03/01) 4.10 | Yes |
-| Unitdata service | UDTS | ITU-T Q.713 (03/01) 4.11 | Yes |
-| Expedited data | ED | ITU-T Q.713 (03/01) 4.12 | Yes |
-| Expedited data acknowledgement | EA | ITU-T Q.713 (03/01) 4.13 | Yes |
-| Reset request | RSR | ITU-T Q.713 (03/01) 4.14 | Yes |
-| Reset confirm | RSC | ITU-T Q.713 (03/01) 4.15 | Yes |
-| Protocol data unit error | ERR | ITU-T Q.713 (03/01) 4.16 | Yes |
-| Inactivity test | IT | ITU-T Q.713 (03/01) 4.17 | Yes |
-| Extended unitdata | XUDT | ITU-T Q.713 (03/01) 4.18 | Yes |
-| Extended unitdata service | XUDTS | ITU-T Q.713 (03/01) 4.19 | Yes |
-| Long unitdata | LUDT | ITU-T Q.713 (03/01) 4.20 | Yes |
-| Long unitdata service | LUDTS | ITU-T Q.713 (03/01) 4.21 | Yes |
-
-## Supported Parameters
-
-| Parameter name | Reference | Codec |
-| --- | --- | --- |
-| End of optional parameters | ITU-T Q.713 (03/01) 3.1 | Yes |
-| Destination local reference | ITU-T Q.713 (03/01) 3.2 | Yes |
-| Source local reference | ITU-T Q.713 (03/01) 3.3 | Yes |
-| Called party address | ITU-T Q.713 (03/01) 3.4 | Yes |
-| Calling party address | ITU-T Q.713 (03/01) 3.5 | Yes |
-| Protocol class | ITU-T Q.713 (03/01) 3.6 | Yes |
-| Segmenting/reassembling | ITU-T Q.713 (03/01) 3.7 | Yes |
-| Receive sequence number | ITU-T Q.713 (03/01) 3.8 | Yes |
-| Sequencing/segmenting | ITU-T Q.713 (03/01) 3.9 | Yes |
-| Credit | ITU-T Q.713 (03/01) 3.10 | Yes |
-| Release cause | ITU-T Q.713 (03/01) 3.11 | Yes |
-| Return cause | ITU-T Q.713 (03/01) 3.12 | Yes |
-| Reset cause | ITU-T Q.713 (03/01) 3.13 | Yes |
-| Error cause | ITU-T Q.713 (03/01) 3.14 | Yes |
-| Refusal cause | ITU-T Q.713 (03/01) 3.15 | Yes |
-| Data | ITU-T Q.713 (03/01) 3.16 | Yes |
-| Segmentation | ITU-T Q.713 (03/01) 3.17 | Yes |
-| Hop counter | ITU-T Q.713 (03/01) 3.18 | Yes |
-| Importance | ITU-T Q.713 (03/01) 3.19 | Yes |
-| Long data | ITU-T Q.713 (03/01) 3.20 | Yes |
+SCTP needs Linux.
 
 ## Validation
-
-The local validation target for Go changes is:
 
 ```sh
 go build ./...
 go test ./... -count=1
+go test ./... -race -count=1
 go vet ./...
 ~/go/bin/staticcheck ./...
 ~/go/bin/golangci-lint run ./...
+(cd examples && go build ./... && go vet ./...)
 ```
 
-Protocol changes should also run race tests and the relevant fuzz targets.
+The fuzz targets are `FuzzParseMessage`, `FuzzMarshalRoundTrip`, `FuzzSCMG`,
+`FuzzUnitdataTransfer`, `FuzzConnectionTransfer`, `params.FuzzPartyAddress` and
+`params.FuzzBCD`.
 
 ## License
 

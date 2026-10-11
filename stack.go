@@ -1,502 +1,641 @@
-// Copyright 2019-2024 go-sccp authors. All rights reserved.
+// Copyright 2019-2026 go-sccp authors. All rights reserved.
 // Use of this source code is governed by a MIT-style license that can be
 // found in the LICENSE file.
 
 package sccp
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"hash/maphash"
 	"sync"
+	"time"
 
 	"github.com/gomaja/go-sccp/params"
 )
 
+// RoutingLabel is the MTP routing information of a message: the routing label
+// of ITU-T Q.704 §2.2 (destination and originating point codes, signalling
+// link selection), as M3UA protocol data carries it (RFC 4666 §3.3.1).
+type RoutingLabel struct {
+	OPC uint32
+	DPC uint32
+	SLS uint8
+}
+
+// TransferIndication is an MTP-TRANSFER indication, ITU-T Q.711 (03/01)
+// §7.2.1: an SCCP message received from the MTP with its routing label.
+type TransferIndication struct {
+	RoutingLabel
+	// Data is the encoded SCCP message. The stack does not retain it.
+	Data []byte
+}
+
+// TransferRequest is an MTP-TRANSFER request, ITU-T Q.711 (03/01) §7.2.1: an
+// SCCP message for the MTP to send with the given routing label.
+type TransferRequest struct {
+	RoutingLabel
+	// Message is the message Data encodes.
+	Message Message
+	// Data is the encoded message, within the stack's maximum message size.
+	Data []byte
+}
+
+// Indication is a primitive the stack delivers to an SCCP user, or an alert
+// for the maintenance function (MaintenanceIndication). Its concrete type is
+// one of the *Indication types of this package.
+type Indication interface {
+	indication()
+}
+
+// UnitdataIndication is an N-UNITDATA indication, ITU-T Q.711 (03/01) Table
+// 12: user data received from the connectionless service, after reassembly of
+// a segmented message.
+type UnitdataIndication struct {
+	// RoutingLabel is the label of the message, or of the first segment.
+	RoutingLabel
+	// MessageType is UDT, XUDT or LUDT.
+	MessageType         MsgType
+	CalledPartyAddress  params.PartyAddress
+	CallingPartyAddress params.PartyAddress
+	// ProtocolClass is 1 when the sender asked for in-sequence delivery. For a
+	// reassembled message it is the in-sequence delivery option of its
+	// segmentation parameter (ITU-T Q.714 (05/01) §4.1.1.2.2).
+	ProtocolClass uint8
+	ReturnOnError bool
+	Importance    *params.Importance
+	Data          []byte
+	// Segments is the number of segments reassembled, 1 for a message that
+	// was not segmented.
+	Segments int
+}
+
+// NoticeIndication is an N-NOTICE indication, ITU-T Q.711 (03/01) Table 13:
+// user data returned by the message return procedure (ITU-T Q.714 (05/01)
+// §4.2).
+type NoticeIndication struct {
+	RoutingLabel
+	// MessageType is the service message received: UDTS, XUDTS or LUDTS.
+	MessageType         MsgType
+	CalledPartyAddress  params.PartyAddress
+	CallingPartyAddress params.PartyAddress
+	ReasonForReturn     params.ReturnCause
+	Importance          *params.Importance
+	// Data is the returned user data. It may be incomplete: a segment, or a
+	// truncated message (ITU-T Q.711 (03/01) §6.2.2.2).
+	Data []byte
+	// Segmentation is the segmentation parameter of a returned segment.
+	Segmentation *params.Segmentation
+}
+
+// MaintenanceIndication alerts the maintenance function to an event the SCCP
+// user is not told about: a message whose hop counter reached zero (ITU-T
+// Q.714 (05/01) §2.3.1 item 3: "In addition, maintenance functions are
+// alerted"), or a connection release that never completed (Figure C.2 sheet
+// 6: "Inform maintenance").
+type MaintenanceIndication struct {
+	// RoutingLabel is the label of the message received, or for a release
+	// the label of the connection section.
+	RoutingLabel
+	// MessageType is the message concerned: the one received, or the RLSD
+	// that got no release complete.
+	MessageType MsgType
+	// LocalReference and RemoteReference identify the connection section of
+	// a release, and are zero otherwise.
+	LocalReference, RemoteReference params.LocalReference
+	// Reason matches ErrHopCounterViolation or ErrReleaseIncomplete with
+	// errors.Is.
+	Reason error
+}
+
+func (*UnitdataIndication) indication()    {}
+func (*NoticeIndication) indication()      {}
+func (*MaintenanceIndication) indication() {}
+
+// Discard reports a received message the stack discarded, and why.
+type Discard struct {
+	RoutingLabel
+	// MessageType is the type of the discarded message. For a message that
+	// could not be decoded it is the first octet received, 0 when there was
+	// none.
+	MessageType MsgType
+	// Reason matches one of the reasons below with errors.Is, or for the
+	// connection-oriented procedures ErrConnectionNotFound,
+	// ErrConnectionReference or ErrConnectionState.
+	Reason error
+}
+
+// Result is what the stack produced for one event: the messages to transfer,
+// in order, the indications for the SCCP users, in order, and the discards.
+type Result struct {
+	Transfers   []TransferRequest
+	Indications []Indication
+	Discards    []Discard
+}
+
+// Reasons for a Discard. They match with errors.Is.
 var (
-	// ErrConnectionNotFound reports a connection-oriented message for an unknown local reference.
-	ErrConnectionNotFound = errors.New("sccp: connection not found")
+	// ErrSyntax: the message could not be decoded, or it carries values that
+	// make it unusable (ITU-T Q.714 (05/01) §3.8.3.3; discarded by §3.8.4 and
+	// §4.3).
+	ErrSyntax = errors.New("sccp: syntax error")
 
-	// ErrLocalReferenceExhausted reports that no non-frozen local reference can be allocated.
-	ErrLocalReferenceExhausted = errors.New("sccp: local reference exhausted")
+	// ErrIncompleteAddress: a called party address routed on SSN with SSN 0
+	// and no global title (ITU-T Q.714 (05/01) §2.2.2.1 item 4).
+	ErrIncompleteAddress = errors.New("sccp: incomplete called party address")
 
-	// ErrInvalidStackMessage reports a message missing fields required by SCCP stack procedures.
-	ErrInvalidStackMessage = errors.New("sccp: invalid stack message")
+	// ErrUndeliverable: the message could not be delivered (ITU-T Q.714
+	// (05/01) §2.8), or the stack could not send its response. A UDT, XUDT or
+	// LUDT that asked for it is returned as well (§4.2).
+	ErrUndeliverable = errors.New("sccp: message undeliverable")
+
+	// ErrReassembly: a segment could not be reassembled (ITU-T Q.714 (05/01)
+	// §4.1.1.2).
+	ErrReassembly = errors.New("sccp: reassembly failed")
+
+	// ErrNotSupported: the stack does not run the procedure the message needs.
+	ErrNotSupported = errors.New("sccp: procedure not supported")
 )
 
-// StackConfig configures an in-memory SCCP stack.
+// Reasons for a MaintenanceIndication. They match with errors.Is.
+var (
+	// ErrHopCounterViolation: a message routed on global title reached hop
+	// counter zero, "an indication that an excessive routing could be
+	// present" (ITU-T Q.714 (05/01) §2.8.6).
+	ErrHopCounterViolation = errors.New("sccp: hop counter violation")
+
+	// ErrReleaseIncomplete: a connection section was released without a
+	// release complete, when T(int) expired (ITU-T Q.714 (05/01) §3.3.3.2).
+	ErrReleaseIncomplete = errors.New("sccp: release incomplete")
+)
+
+// Errors returned for requests.
+var (
+	// ErrInvalidRequest reports a primitive whose parameters the stack refuses.
+	ErrInvalidRequest = errors.New("sccp: invalid request")
+
+	// ErrSegmentation reports user data that cannot be segmented: longer than
+	// 3952 octets, or needing more than 16 segments (ITU-T Q.714 (05/01)
+	// §4.1.1.1).
+	ErrSegmentation = errors.New("sccp: segmentation failed")
+)
+
+// minMessageSize is the smallest maximum message size: an IT, ITU-T Q.713
+// (03/01) Table 18, the longest of the messages without user data that the
+// connection-oriented procedures send (CC, CREF, RLSD, RLC, ERR, IT).
+const minMessageSize = 11
+
+// Default timer values and limits.
+const (
+	// DefaultReassemblyTimeout is T(reassembly), which ITU-T Q.714 (05/01)
+	// Annex C.4 sets to 10 to 20 seconds.
+	DefaultReassemblyTimeout = 15 * time.Second
+
+	// DefaultSegmentationReferenceFreeze keeps a segmentation local reference
+	// out of use after its last segment was sent, long enough for the far
+	// end's T(reassembly) to end (ITU-T Q.714 (05/01) §4.1.1.1.2: the reference
+	// "shall be frozen until the completion of the reassembly process").
+	DefaultSegmentationReferenceFreeze = 20 * time.Second
+
+	// DefaultMaxReassemblies bounds the reassembly processes in progress.
+	DefaultMaxReassemblies = 1024
+
+	// DefaultMaxReassemblyOctets bounds the user data buffered by them.
+	DefaultMaxReassemblyOctets = 4 << 20
+
+	// MinSegmentationThreshold is the smallest Z, ITU-T Q.714 (05/01)
+	// §4.1.1.1.1 footnote 6: 160 <= Z <= Y.
+	MinSegmentationThreshold = 160
+)
+
+// StackConfig configures a Stack. The zero value of every field selects its
+// default.
 type StackConfig struct {
-	LocalPointCode        uint16
-	InitialLocalReference uint32
+	// PointCode is the signalling point code of this node: the OPC of the
+	// messages it originates.
+	PointCode uint32
+
+	// MaxMessageSize is the largest SCCP message the stack sends, in octets.
+	// Zero selects DefaultMaxMessageSize, the narrowband MTP-SAP of ITU-T
+	// Q.711 (03/01) §7.1 a). Larger user data is segmented. It is at least
+	// 11 octets, an IT (ITU-T Q.713 (03/01) Table 18), so that every message
+	// the connection-oriented procedures must be able to send fits.
+	MaxMessageSize int
+
+	// HopCounter is the hop counter of the XUDT, XUDTS, LUDT and LUDTS the
+	// stack originates. Zero selects params.MaxHopCounter (15).
+	HopCounter params.HopCounter
+
+	// UseXUDT sends user data that needs no segmentation in an XUDT instead
+	// of a UDT. A request with an importance always uses an XUDT.
+	UseXUDT bool
+
+	// SegmentationThreshold is Z of ITU-T Q.714 (05/01) §4.1.1.1.1: user data
+	// longer than Z octets is segmented into segments of at most Z octets even
+	// when it would fit one message, and user data of Z octets or less is not
+	// segmented unless it does not fit. Zero segments only what does not
+	// fit; otherwise it must be at least MinSegmentationThreshold.
+	SegmentationThreshold int
+
+	// SegmentationReferenceFreeze is how long a segmentation local reference
+	// stays out of use. Zero selects DefaultSegmentationReferenceFreeze.
+	SegmentationReferenceFreeze time.Duration
+
+	// ReassemblyTimeout is T(reassembly). Zero selects
+	// DefaultReassemblyTimeout.
+	ReassemblyTimeout time.Duration
+
+	// MaxReassemblies bounds the reassembly processes, a failed one keeping
+	// its place as the record of its message for T(reassembly) so that the
+	// message is returned once; separately, it bounds the records of
+	// messages that failed with no process. MaxReassemblyOctets bounds the
+	// user data the processes hold. A first segment beyond either bound, or
+	// a later segment beyond MaxReassemblyOctets, ends its reassembly with
+	// the cause network congestion, ITU-T Q.714 (05/01) §4.1.1.2.3.4. A
+	// message that fails with no process when no record is left is
+	// discarded without a return. Zero selects the defaults.
+	MaxReassemblies     int
+	MaxReassemblyOctets int
+
+	// LocalGlobalTitle reports whether a called party address routed on
+	// global title addresses this node. The message is then delivered to the
+	// subsystem number of the address, the result of the final translation
+	// at this node (ITU-T Q.714 (05/01) §2.3.1 item 3 a) i)). Nil accepts
+	// every global title. It is called without the stack locked, and may be
+	// called for messages that are then discarded.
+	LocalGlobalTitle func(called params.PartyAddress) bool
+
+	// Connection configures the connection-oriented procedures.
+	Connection ConnectionConfig
+
+	// Now is the clock. Nil selects time.Now. It is called without the stack
+	// locked, possibly from several goroutines at once.
+	Now func() time.Time
 }
 
-// Stack owns local subsystem availability and connection-section state.
+// Stack runs the SCCP procedures of an end node: connectionless data transfer
+// with segmentation and reassembly, the message return procedure and the
+// connection-oriented procedures. It performs no I/O: the caller passes the
+// messages the MTP delivered to HandleTransfer, sends the TransferRequests of
+// every Result, delivers its Indications to the SCCP users, and calls
+// HandleTimeout when NextTimeout says a timer is due (RunTimers does that).
+//
+// A Stack is safe for concurrent use.
 type Stack struct {
-	mu                 sync.RWMutex
-	localPointCode     uint16
-	nextLocalReference uint32
-	subsystems         map[uint8]struct{}
-	connections        map[uint32]*ConnectionSection
+	mu  sync.Mutex
+	cfg StackConfig
+
+	subsystems map[uint8]bool // registered subsystems and their availability
+
+	timers timerHeap
+	wake   chan struct{}
+
+	nextSLS uint8
+
+	// segmentation
+	nextSegmentationReference uint32
+	frozenSegmentation        map[uint32]time.Time
+	frozenSegmentationOrder   []frozenReference
+
+	// reassembly: processes in progress and records of failed messages. A
+	// slot holds a process, then the record of its message if it fails; the
+	// records of messages that failed with no process are counted apart.
+	reassemblies     map[reassemblyKey]*reassembly
+	reassemblyOctets int
+	reassemblySlots  int
+	orphanRecords    int
+	segmentSeed      maphash.Seed
+
+	conn connectionState
 }
 
-// StackResult contains local delivery, notice, and outbound messages produced by HandleMessage.
-type StackResult struct {
-	Deliveries      []UnitdataIndication
-	DataIndications []DataIndication
-	Notices         []NoticeIndication
-	Outbound        []Message
-}
-
-// UnitdataIndication represents an N-UNITDATA indication delivered to a local SCCP user.
-type UnitdataIndication struct {
-	Message             Message
-	ProtocolClass       int
-	ReturnOnError       bool
-	CalledPartyAddress  *params.PartyAddress
-	CallingPartyAddress *params.PartyAddress
-	Data                []byte
-}
-
-// NoticeIndication represents an N-NOTICE indication for a received service message.
-type NoticeIndication struct {
-	Message             Message
-	ReturnCause         params.ReturnCauseValue
-	CalledPartyAddress  *params.PartyAddress
-	CallingPartyAddress *params.PartyAddress
-	Data                []byte
-}
-
-// NewStack creates an SCCP stack with local subsystem and connection-section state.
-func NewStack(config StackConfig) *Stack {
-	initialReference := config.InitialLocalReference
-	if initialReference == 0 {
-		initialReference = 1
+// NewStack returns a Stack for the configuration.
+func NewStack(cfg StackConfig) (*Stack, error) {
+	if cfg.MaxMessageSize == 0 {
+		cfg.MaxMessageSize = DefaultMaxMessageSize
 	}
-
-	return &Stack{
-		localPointCode:     config.LocalPointCode,
-		nextLocalReference: initialReference & 0x00ffffff,
-		subsystems:         make(map[uint8]struct{}),
-		connections:        make(map[uint32]*ConnectionSection),
+	if cfg.HopCounter == 0 {
+		cfg.HopCounter = params.MaxHopCounter
 	}
+	if cfg.SegmentationReferenceFreeze == 0 {
+		cfg.SegmentationReferenceFreeze = DefaultSegmentationReferenceFreeze
+	}
+	if cfg.ReassemblyTimeout == 0 {
+		cfg.ReassemblyTimeout = DefaultReassemblyTimeout
+	}
+	if cfg.MaxReassemblies == 0 {
+		cfg.MaxReassemblies = DefaultMaxReassemblies
+	}
+	if cfg.MaxReassemblyOctets == 0 {
+		cfg.MaxReassemblyOctets = DefaultMaxReassemblyOctets
+	}
+	if cfg.Now == nil {
+		cfg.Now = time.Now
+	}
+	switch {
+	case cfg.MaxMessageSize < minMessageSize || cfg.MaxMessageSize > MaxBroadbandMessageSize:
+		return nil, fmt.Errorf("%w: maximum message size %d, want %d to %d", ErrInvalidRequest, cfg.MaxMessageSize, minMessageSize, MaxBroadbandMessageSize)
+	case cfg.HopCounter > params.MaxHopCounter:
+		return nil, fmt.Errorf("%w: hop counter %d exceeds %d", ErrInvalidRequest, cfg.HopCounter, params.MaxHopCounter)
+	case cfg.SegmentationThreshold != 0 && cfg.SegmentationThreshold < MinSegmentationThreshold:
+		return nil, fmt.Errorf("%w: segmentation threshold %d below %d", ErrInvalidRequest, cfg.SegmentationThreshold, MinSegmentationThreshold)
+	case cfg.SegmentationReferenceFreeze < 0, cfg.ReassemblyTimeout < 0, cfg.MaxReassemblies < 0, cfg.MaxReassemblyOctets < 0:
+		return nil, fmt.Errorf("%w: negative timer or limit", ErrInvalidRequest)
+	}
+	s := &Stack{
+		cfg:                       cfg,
+		subsystems:                make(map[uint8]bool),
+		wake:                      make(chan struct{}, 1),
+		nextSegmentationReference: 1,
+		frozenSegmentation:        make(map[uint32]time.Time),
+		reassemblies:              make(map[reassemblyKey]*reassembly),
+		segmentSeed:               maphash.MakeSeed(),
+	}
+	if err := s.initConnections(); err != nil {
+		return nil, err
+	}
+	return s, nil
 }
 
-// RegisterSubsystem marks a local subsystem as available for connectionless delivery.
+// RegisterSubsystem equips a local subsystem and marks it available.
 func (s *Stack) RegisterSubsystem(ssn uint8) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
-	s.subsystems[ssn] = struct{}{}
+	s.subsystems[ssn] = true
 }
 
-// UnregisterSubsystem marks a local subsystem as unavailable.
+// UnregisterSubsystem removes a local subsystem: messages for it are returned
+// with the cause unequipped user (ITU-T Q.714 (05/01) §2.8.5).
 func (s *Stack) UnregisterSubsystem(ssn uint8) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
 	delete(s.subsystems, ssn)
 }
 
-// SubsystemAvailable reports whether a local subsystem is registered.
-func (s *Stack) SubsystemAvailable(ssn uint8) bool {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	_, ok := s.subsystems[ssn]
-	return ok
-}
-
-// HandleMessage applies SCCP stack procedures to an already decoded message.
-func (s *Stack) HandleMessage(message Message) (StackResult, error) {
-	switch msg := message.(type) {
-	case *UDT:
-		return s.handleUnitdata(msg, msg.ProtocolClass, nil, msg.CalledPartyAddress, msg.CallingPartyAddress, msg.Data.Value())
-	case *XUDT:
-		return s.handleUnitdata(msg, msg.ProtocolClass, msg.HopCounter, msg.CalledPartyAddress, msg.CallingPartyAddress, msg.Data.Value())
-	case *LUDT:
-		return s.handleUnitdata(msg, msg.ProtocolClass, msg.HopCounter, msg.CalledPartyAddress, msg.CallingPartyAddress, msg.LongData.Value())
-	case *UDTS:
-		return serviceNotice(msg, msg.ReturnCause, msg.CalledPartyAddress, msg.CallingPartyAddress, msg.Data.Value()), nil
-	case *XUDTS:
-		return serviceNotice(msg, msg.ReturnCause, msg.CalledPartyAddress, msg.CallingPartyAddress, msg.Data.Value()), nil
-	case *LUDTS:
-		return serviceNotice(msg, msg.ReturnCause, msg.CalledPartyAddress, msg.CallingPartyAddress, msg.LongData.Value()), nil
-	case *CC:
-		return s.handleConnectionConfirm(msg)
-	case *CREF:
-		return s.handleConnectionRefused(msg)
-	case *RLSD:
-		return s.handleReleased(msg)
-	case *RLC:
-		return s.handleReleaseComplete(msg)
-	case *DT1:
-		return s.handleDataForm1(msg)
-	case *DT2:
-		return s.handleDataForm2(msg)
-	case *AK:
-		return s.handleAcknowledgement(msg)
-	default:
-		return StackResult{}, nil
-	}
-}
-
-// NewConnectionRequest allocates a local reference, stores a pending section, and returns a CR.
-func (s *Stack) NewConnectionRequest(
-	protocolClass int,
-	returnOnError bool,
-	credit uint8,
-	calledPartyAddress *params.PartyAddress,
-	callingPartyAddress *params.PartyAddress,
-	data []byte,
-) (*CR, uint32, error) {
-	if calledPartyAddress == nil {
-		return nil, 0, fmt.Errorf("%w: missing called party address", ErrInvalidStackMessage)
-	}
-
-	localReference, err := s.allocateLocalReference()
-	if err != nil {
-		return nil, 0, err
-	}
-
-	opts := make([]params.Parameter, 0, 3)
-	if credit != 0 {
-		opts = append(opts, params.NewCreditOptional(credit))
-	}
-	if callingPartyAddress != nil {
-		opts = append(opts, clonePartyAddress(callingPartyAddress, params.PCodeCallingPartyAddress))
-	}
-	if data != nil {
-		opts = append(opts, params.NewDataOptional(cloneBytes(data)))
-	}
-
-	request := NewCR(localReference, protocolClass, returnOnError, calledPartyAddress, opts...)
-
-	s.mu.Lock()
-	s.connections[localReference] = NewPendingConnectionSection(localReference, protocolClass, credit)
-	s.mu.Unlock()
-
-	return request, localReference, nil
-}
-
-// Connection returns a copy of the connection section for the local reference.
-func (s *Stack) Connection(localReference uint32) (ConnectionSection, bool) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	section, ok := s.connections[localReference]
-	if !ok {
-		return ConnectionSection{}, false
-	}
-	return *section, true
-}
-
-// ReleaseConnection starts release for an established connection section.
-func (s *Stack) ReleaseConnection(localReference uint32, cause params.ReleaseCauseValue, opts ...params.Parameter) (*RLSD, error) {
+// SetSubsystemAvailable marks a registered subsystem available or prohibited.
+// Messages for a prohibited subsystem are returned with the cause subsystem
+// failure (ITU-T Q.714 (05/01) §2.8.3). It reports false for a subsystem that
+// is not registered.
+func (s *Stack) SetSubsystemAvailable(ssn uint8, available bool) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
-	section, ok := s.connections[localReference]
-	if !ok {
-		return nil, fmt.Errorf("%w: local reference %#06x", ErrConnectionNotFound, localReference)
-	}
-	return section.Release(cause, opts...)
-}
-
-func (s *Stack) handleUnitdata(
-	message Message,
-	protocolClass *params.ProtocolClass,
-	hopCounter *params.HopCounter,
-	calledPartyAddress *params.PartyAddress,
-	callingPartyAddress *params.PartyAddress,
-	data []byte,
-) (StackResult, error) {
-	// ITU-T Q.714 (05/01), section 4.2 returns UDT/XUDT/LUDT only when
-	// return-message-on-error is requested; otherwise the message is discarded.
-	if hopCounter != nil && hopCounter.Value() == 0 {
-		return s.returnConnectionless(message, params.ReturnCauseHopCounterViolation, protocolClass, hopCounter, calledPartyAddress, callingPartyAddress, data)
-	}
-
-	if calledPartyAddress == nil || !calledPartyAddress.HasSSN() {
-		return s.returnConnectionless(message, params.ReturnCauseNoTranslationForThisSpecificAddress, protocolClass, hopCounter, calledPartyAddress, callingPartyAddress, data)
-	}
-
-	s.mu.RLock()
-	_, ok := s.subsystems[calledPartyAddress.SubsystemNumber]
-	s.mu.RUnlock()
-	if !ok || !s.isLocalAddress(calledPartyAddress) {
-		return s.returnConnectionless(message, params.ReturnCauseSubsystemFailure, protocolClass, hopCounter, calledPartyAddress, callingPartyAddress, data)
-	}
-
-	return StackResult{
-		Deliveries: []UnitdataIndication{
-			{
-				Message:             message,
-				ProtocolClass:       protocolClass.Class(),
-				ReturnOnError:       protocolClass.ReturnOnError(),
-				CalledPartyAddress:  clonePartyAddress(calledPartyAddress, params.PCodeCalledPartyAddress),
-				CallingPartyAddress: clonePartyAddress(callingPartyAddress, params.PCodeCallingPartyAddress),
-				Data:                cloneBytes(data),
-			},
-		},
-	}, nil
-}
-
-func (s *Stack) returnConnectionless(
-	message Message,
-	cause params.ReturnCauseValue,
-	protocolClass *params.ProtocolClass,
-	hopCounter *params.HopCounter,
-	calledPartyAddress *params.PartyAddress,
-	callingPartyAddress *params.PartyAddress,
-	data []byte,
-) (StackResult, error) {
-	if protocolClass == nil || !protocolClass.ReturnOnError() {
-		return StackResult{}, nil
-	}
-	if calledPartyAddress == nil {
-		return StackResult{}, fmt.Errorf("%w: missing called party address", ErrInvalidStackMessage)
-	}
-	if callingPartyAddress == nil {
-		return StackResult{}, fmt.Errorf("%w: missing calling party address", ErrInvalidStackMessage)
-	}
-
-	var response Message
-	switch message.(type) {
-	case *UDT:
-		response = NewUDTS(
-			cause,
-			clonePartyAddress(callingPartyAddress, params.PCodeCalledPartyAddress),
-			clonePartyAddress(calledPartyAddress, params.PCodeCallingPartyAddress),
-			cloneBytes(data),
-		)
-	case *XUDT:
-		response = NewXUDTS(
-			cause,
-			nextHopCounter(hopCounter),
-			clonePartyAddress(callingPartyAddress, params.PCodeCalledPartyAddress),
-			clonePartyAddress(calledPartyAddress, params.PCodeCallingPartyAddress),
-			cloneBytes(data),
-		)
-	case *LUDT:
-		response = NewLUDTS(
-			cause,
-			nextHopCounter(hopCounter),
-			clonePartyAddress(callingPartyAddress, params.PCodeCalledPartyAddress),
-			clonePartyAddress(calledPartyAddress, params.PCodeCallingPartyAddress),
-			cloneBytes(data),
-		)
-	default:
-		return StackResult{}, nil
-	}
-	return StackResult{Outbound: []Message{response}}, nil
-}
-
-func (s *Stack) handleConnectionConfirm(confirm *CC) (StackResult, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	section, err := s.connectionForDestinationLocked(confirm.DestinationLocalReference)
-	if err != nil {
-		return StackResult{}, err
-	}
-	return StackResult{}, section.HandleConnectionConfirm(confirm)
-}
-
-func (s *Stack) handleConnectionRefused(refusal *CREF) (StackResult, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	section, err := s.connectionForDestinationLocked(refusal.DestinationLocalReference)
-	if err != nil {
-		return StackResult{}, err
-	}
-	return StackResult{}, section.HandleConnectionRefused(refusal)
-}
-
-func (s *Stack) handleReleased(released *RLSD) (StackResult, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	section, err := s.connectionForDestinationLocked(released.DestinationLocalReference)
-	if err != nil {
-		return StackResult{}, err
-	}
-	complete, err := section.HandleReleased(released)
-	if err != nil {
-		return StackResult{}, err
-	}
-	return StackResult{Outbound: []Message{complete}}, nil
-}
-
-func (s *Stack) handleReleaseComplete(complete *RLC) (StackResult, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	section, err := s.connectionForDestinationLocked(complete.DestinationLocalReference)
-	if err != nil {
-		return StackResult{}, err
-	}
-	return StackResult{}, section.HandleReleaseComplete(complete)
-}
-
-func (s *Stack) handleDataForm1(data *DT1) (StackResult, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if data == nil {
-		return StackResult{}, fmt.Errorf("%w: nil DT1", ErrReferenceMismatch)
-	}
-	section, err := s.connectionForDestinationLocked(data.DestinationLocalReference)
-	if err != nil {
-		return StackResult{}, err
-	}
-	indication, err := section.HandleDataForm1(data)
-	if err != nil {
-		return StackResult{}, err
-	}
-	return StackResult{DataIndications: []DataIndication{indication}}, nil
-}
-
-func (s *Stack) handleDataForm2(data *DT2) (StackResult, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if data == nil {
-		return StackResult{}, fmt.Errorf("%w: nil DT2", ErrReferenceMismatch)
-	}
-	section, err := s.connectionForDestinationLocked(data.DestinationLocalReference)
-	if err != nil {
-		return StackResult{}, err
-	}
-	indication, err := section.HandleDataForm2(data)
-	if err != nil {
-		return StackResult{}, err
-	}
-
-	result := StackResult{DataIndications: []DataIndication{indication}}
-	if indication.Acknowledgement != nil {
-		result.Outbound = []Message{indication.Acknowledgement}
-	}
-	return result, nil
-}
-
-func (s *Stack) handleAcknowledgement(acknowledgement *AK) (StackResult, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if acknowledgement == nil {
-		return StackResult{}, fmt.Errorf("%w: nil AK", ErrReferenceMismatch)
-	}
-	section, err := s.connectionForDestinationLocked(acknowledgement.DestinationLocalReference)
-	if err != nil {
-		return StackResult{}, err
-	}
-	return StackResult{}, section.HandleAcknowledgement(acknowledgement)
-}
-
-func (s *Stack) connectionForDestinationLocked(ref *params.LocalReference) (*ConnectionSection, error) {
-	if ref == nil {
-		return nil, fmt.Errorf("%w: missing destination local reference", ErrReferenceMismatch)
-	}
-
-	localReference := ref.Uint32()
-	section, ok := s.connections[localReference]
-	if !ok {
-		return nil, fmt.Errorf("%w: local reference %#06x", ErrConnectionNotFound, localReference)
-	}
-	return section, nil
-}
-
-func (s *Stack) allocateLocalReference() (uint32, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	start := s.nextLocalReference
-	for {
-		reference := s.nextLocalReference & 0x00ffffff
-		if reference == 0 {
-			reference = 1
-		}
-		s.nextLocalReference = (reference + 1) & 0x00ffffff
-		if _, exists := s.connections[reference]; !exists {
-			return reference, nil
-		}
-		if s.nextLocalReference == start {
-			return 0, ErrLocalReferenceExhausted
-		}
-	}
-}
-
-func (s *Stack) isLocalAddress(address *params.PartyAddress) bool {
-	if address == nil {
+	if _, ok := s.subsystems[ssn]; !ok {
 		return false
 	}
-	if !address.HasPC() {
-		return true
-	}
-	return address.SignalingPointCode == s.localPointCode
+	s.subsystems[ssn] = available
+	return true
 }
 
-func serviceNotice(
-	message Message,
-	cause *params.ReturnCause,
-	calledPartyAddress *params.PartyAddress,
-	callingPartyAddress *params.PartyAddress,
-	data []byte,
-) StackResult {
-	returnCause := params.ReturnCauseUnqualified
-	if cause != nil {
-		returnCause = cause.Value()
+// SubsystemStatus reports whether a subsystem is registered and available.
+func (s *Stack) SubsystemStatus(ssn uint8) (registered, available bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	available, registered = s.subsystems[ssn]
+	return registered, available
+}
+
+// HandleTransfer runs the procedures for a message received from the MTP.
+//
+// LocalGlobalTitle is called before the stack is locked, so it may call the
+// Stack's methods.
+func (s *Stack) HandleTransfer(ind TransferIndication) Result {
+	m, err := ParseMessage(ind.Data)
+	local := true
+	if err == nil && s.cfg.LocalGlobalTitle != nil {
+		if called, ok := calledAddress(m); ok && called.GlobalTitle != nil {
+			// A copy: the callback must not reach the message the stack keeps.
+			local = s.cfg.LocalGlobalTitle(called.Clone())
+		}
 	}
-	return StackResult{
-		Notices: []NoticeIndication{
-			{
-				Message:             message,
-				ReturnCause:         returnCause,
-				CalledPartyAddress:  clonePartyAddress(calledPartyAddress, params.PCodeCalledPartyAddress),
-				CallingPartyAddress: clonePartyAddress(callingPartyAddress, params.PCodeCallingPartyAddress),
-				Data:                cloneBytes(data),
-			},
-		},
+
+	now := s.cfg.Now()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var res Result
+	s.expire(now, &res)
+
+	if err != nil {
+		// ITU-T Q.714 (05/01) §1.1.4.2: a message with an unrecognized type
+		// is discarded; §4.3 and §3.8.4: so is one with a syntax error.
+		t := MsgType(0)
+		if len(ind.Data) > 0 {
+			t = MsgType(ind.Data[0])
+		}
+		res.discard(ind.RoutingLabel, t, fmt.Errorf("%w: %w", ErrSyntax, err))
+		return res
+	}
+	switch m := m.(type) {
+	case *UDT, *XUDT, *LUDT:
+		s.handleUnitdata(now, ind.RoutingLabel, m, local, &res)
+	case *UDTS, *XUDTS, *LUDTS:
+		s.handleService(ind.RoutingLabel, m, local, &res)
+	default:
+		s.handleConnectionOriented(now, ind.RoutingLabel, m, local, &res)
+	}
+	return res
+}
+
+// calledAddress returns the called party address of a message that SCCP
+// routing examines: the connectionless messages and CR.
+func calledAddress(m Message) (params.PartyAddress, bool) {
+	switch m := m.(type) {
+	case *UDT:
+		return m.CalledPartyAddress, true
+	case *XUDT:
+		return m.CalledPartyAddress, true
+	case *LUDT:
+		return m.CalledPartyAddress, true
+	case *UDTS:
+		return m.CalledPartyAddress, true
+	case *XUDTS:
+		return m.CalledPartyAddress, true
+	case *LUDTS:
+		return m.CalledPartyAddress, true
+	case *CR:
+		return m.CalledPartyAddress, true
+	}
+	return params.PartyAddress{}, false
+}
+
+// HandleTimeout runs the timers that are due.
+func (s *Stack) HandleTimeout() Result {
+	now := s.cfg.Now()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var res Result
+	s.expire(now, &res)
+	return res
+}
+
+// NextTimeout returns when the earliest timer is due, and false when no timer
+// runs.
+func (s *Stack) NextTimeout() (time.Time, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.timers) == 0 {
+		return time.Time{}, false
+	}
+	return s.timers[0].deadline, true
+}
+
+// RunTimers runs the stack's timers until ctx is done, calling deliver with
+// every non-empty Result they produce. It needs the default clock: it waits in
+// real time.
+func (s *Stack) RunTimers(ctx context.Context, deliver func(Result)) {
+	t := time.NewTimer(time.Hour)
+	defer t.Stop()
+	for {
+		wait := time.Hour
+		if next, ok := s.NextTimeout(); ok {
+			wait = max(time.Until(next), 0)
+		}
+		t.Reset(wait)
+		select {
+		case <-ctx.Done():
+			return
+		case <-s.wake:
+		case <-t.C:
+			if res := s.HandleTimeout(); !res.empty() {
+				deliver(res)
+			}
+		}
 	}
 }
 
-func nextHopCounter(hopCounter *params.HopCounter) uint8 {
-	if hopCounter == nil {
-		return 0
-	}
-	return hopCounter.Value()
+func (r *Result) empty() bool {
+	return len(r.Transfers) == 0 && len(r.Indications) == 0 && len(r.Discards) == 0
 }
 
-func clonePartyAddress(address *params.PartyAddress, code params.ParameterNameCode) *params.PartyAddress {
-	if address == nil {
-		return nil
-	}
-	return params.NewPartyAddress(
-		code,
-		address.Indicator,
-		address.SignalingPointCode,
-		address.SubsystemNumber,
-		cloneGlobalTitle(address.GlobalTitle),
-	)
+func (r *Result) discard(label RoutingLabel, t MsgType, reason error) {
+	r.Discards = append(r.Discards, Discard{RoutingLabel: label, MessageType: t, Reason: reason})
 }
 
-func cloneGlobalTitle(globalTitle *params.GlobalTitle) *params.GlobalTitle {
-	if globalTitle == nil {
-		return nil
+// transfer encodes m within the maximum message size and appends it to the
+// result.
+func (s *Stack) transfer(r *Result, label RoutingLabel, m Message) error {
+	b, err := MarshalOptions{MaxMessageSize: s.cfg.MaxMessageSize}.Marshal(m)
+	if err != nil {
+		return err
 	}
-	return params.NewGlobalTitle(
-		globalTitle.GTI,
-		globalTitle.TranslationType,
-		globalTitle.NumberingPlan,
-		globalTitle.EncodingScheme,
-		globalTitle.NatureOfAddressIndicator,
-		cloneBytes(globalTitle.AddressInformation),
-	)
+	r.Transfers = append(r.Transfers, TransferRequest{RoutingLabel: label, Message: m, Data: b})
+	return nil
 }
 
-func cloneBytes(b []byte) []byte {
-	if b == nil {
-		return nil
+// replyLabel routes a message back to the originator of a received one: to
+// its OPC, from the point code it was sent to, on the same link selection.
+func replyLabel(received RoutingLabel) RoutingLabel {
+	return RoutingLabel{OPC: received.DPC, DPC: received.OPC, SLS: received.SLS}
+}
+
+// originLabel routes a message to the SCCP node that originated a received
+// one. ITU-T Q.714 (05/01) §2.7.5.1 c): the point code of a calling party
+// address routed on SSN identifies that node; without one, the OPC of the
+// routing label does. A calling party address routed on global title would
+// need a translation this end node does not make (ITU-T Q.715 (04/02)
+// §8.3.1.1), so the message goes to the OPC, the node that can translate it.
+func originLabel(received RoutingLabel, calling params.PartyAddress) RoutingLabel {
+	l := replyLabel(received)
+	if calling.RouteOnSSN && calling.HasPointCode {
+		l.DPC = uint32(calling.PointCode)
 	}
-	return append([]byte(nil), b...)
+	return l
+}
+
+// sls returns the signalling link selection of an originated message: the
+// sequence control of class 1 (ITU-T Q.714 (05/01) §4.1: the same SLS keeps
+// the sequence), otherwise a rotating value that load-shares class 0.
+func (s *Stack) sls(class, sequenceControl uint8) uint8 {
+	if class == 1 {
+		return sequenceControl & 0x0f
+	}
+	v := s.nextSLS
+	s.nextSLS = (s.nextSLS + 1) & 0x0f
+	return v
+}
+
+// timer is a stack timer. fire runs with the stack lock held.
+type timer struct {
+	deadline time.Time
+	fire     func(now time.Time, res *Result)
+	index    int // position in the heap, -1 when stopped or fired
+}
+
+type timerHeap []*timer
+
+func (h timerHeap) less(i, j int) bool { return h[i].deadline.Before(h[j].deadline) }
+
+func (h timerHeap) swap(i, j int) {
+	h[i], h[j] = h[j], h[i]
+	h[i].index, h[j].index = i, j
+}
+
+func (h timerHeap) up(i int) {
+	for i > 0 {
+		p := (i - 1) / 2
+		if !h.less(i, p) {
+			return
+		}
+		h.swap(i, p)
+		i = p
+	}
+}
+
+func (h timerHeap) down(i int) {
+	for {
+		l := 2*i + 1
+		if l >= len(h) {
+			return
+		}
+		c := l
+		if r := l + 1; r < len(h) && h.less(r, l) {
+			c = r
+		}
+		if !h.less(c, i) {
+			return
+		}
+		h.swap(i, c)
+		i = c
+	}
+}
+
+// schedule starts a timer that calls fire at the deadline.
+func (s *Stack) schedule(deadline time.Time, fire func(now time.Time, res *Result)) *timer {
+	t := &timer{deadline: deadline, fire: fire, index: len(s.timers)}
+	s.timers = append(s.timers, t)
+	s.timers.up(t.index)
+	if t.index == 0 {
+		select {
+		case s.wake <- struct{}{}:
+		default:
+		}
+	}
+	return t
+}
+
+// stop stops a timer; stopping a stopped timer does nothing.
+func (s *Stack) stop(t *timer) {
+	if t == nil || t.index < 0 {
+		return
+	}
+	i, last := t.index, len(s.timers)-1
+	if i != last {
+		s.timers.swap(i, last)
+	}
+	s.timers[last] = nil
+	s.timers = s.timers[:last]
+	if i != last {
+		s.timers.down(i)
+		s.timers.up(i)
+	}
+	t.index = -1
+}
+
+// expire fires every timer due at now, in deadline order.
+func (s *Stack) expire(now time.Time, res *Result) {
+	for len(s.timers) > 0 && !s.timers[0].deadline.After(now) {
+		t := s.timers[0]
+		s.stop(t)
+		t.fire(now, res)
+	}
 }

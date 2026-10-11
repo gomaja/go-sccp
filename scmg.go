@@ -1,141 +1,112 @@
-// Copyright 2019-2024 go-sccp authors. All rights reserved.
+// Copyright 2019-2026 go-sccp authors. All rights reserved.
 // Use of this source code is governed by a MIT-style license that can be
 // found in the LICENSE file.
 
 package sccp
 
 import (
-	"encoding/binary"
 	"fmt"
 	"io"
+
+	"github.com/gomaja/go-sccp/params"
 )
 
-// SCMGType is type of SCMG message.
+// SCMGType is the SCMG format identifier, ITU-T Q.713 (03/01) §5.1.1, Table 23.
 type SCMGType uint8
 
-// ITU-T Q.713 (03/01), Table 23.
+// SCMG format identifiers, ITU-T Q.713 (03/01) Table 23.
 const (
-	_           SCMGType = iota
-	SCMGTypeSSA          // SSA
-	SCMGTypeSSP          // SSP
-	SCMGTypeSST          // SST
-	SCMGTypeSOR          // SOR
-	SCMGTypeSOG          // SOG
-	SCMGTypeSSC          // SSC
+	SCMGTypeSSA SCMGType = 0x01 // SSA
+	SCMGTypeSSP SCMGType = 0x02 // SSP
+	SCMGTypeSST SCMGType = 0x03 // SST
+	SCMGTypeSOR SCMGType = 0x04 // SOR
+	SCMGTypeSOG SCMGType = 0x05 // SOG
+	SCMGTypeSSC SCMGType = 0x06 // SSC
 )
 
-// SCMG represents a SCCP Management message (SCMG).
-// See ITU-T Q.713 (03/01), section 5.3.
+// SCMGSubsystemNumber is the subsystem number of SCCP management, ITU-T Q.713
+// (03/01) §3.4.2.2 and §5.1.
+const SCMGSubsystemNumber = 1
+
+// SCMG is an SCCP management message, carried in the data of a UDT, XUDT or
+// LUDT between the SCMG subsystems, ITU-T Q.713 (03/01) clause 5, Tables 24
+// and 25.
 type SCMG struct {
-	Type                           SCMGType
-	AffectedSSN                    uint8
-	AffectedPC                     uint16
+	Type SCMGType
+
+	// AffectedSSN is the affected subsystem number (§5.2.1).
+	AffectedSSN uint8
+
+	// AffectedPointCode is the 14-bit affected signalling point code, coded as
+	// in the called party address (§5.2.2, §3.4.2.1).
+	AffectedPointCode uint16
+
+	// SubsystemMultiplicityIndicator is the 2-bit SMI (§5.2.3).
 	SubsystemMultiplicityIndicator uint8
-	SCCPCongestionLevel            uint8
+
+	// CongestionLevel is the SCCP congestion level of SSC, 1 (least) to 8
+	// (most congested), in bits 1-4 (§5.2.4). It is absent from the other
+	// messages and must be zero for them.
+	CongestionLevel uint8
 }
 
-// NewSCMG creates a new SCMG.
-func NewSCMG(typ SCMGType, assn uint8, apc uint16, smi uint8, scl uint8) *SCMG {
-	return &SCMG{
-		Type:                           typ,
-		AffectedSSN:                    assn,
-		AffectedPC:                     apc,
-		SubsystemMultiplicityIndicator: smi,
-		SCCPCongestionLevel:            scl,
+// AppendBinary appends the SCMG message to b. On error b is returned
+// unchanged.
+func (s SCMG) AppendBinary(b []byte) ([]byte, error) {
+	switch {
+	case s.Type < SCMGTypeSSA || s.Type > SCMGTypeSSC:
+		return b, fmt.Errorf("%w: SCMG format identifier %d", ErrInvalidMessage, uint8(s.Type))
+	case s.AffectedPointCode > params.MaxPointCode:
+		return b, fmt.Errorf("%w: SCMG affected point code %#x exceeds 14 bits", ErrInvalidMessage, s.AffectedPointCode)
+	case s.SubsystemMultiplicityIndicator > 3:
+		return b, fmt.Errorf("%w: SCMG subsystem multiplicity indicator %d exceeds 2 bits", ErrInvalidMessage, s.SubsystemMultiplicityIndicator)
+	case s.Type == SCMGTypeSSC && (s.CongestionLevel < 1 || s.CongestionLevel > 8):
+		return b, fmt.Errorf("%w: SCCP congestion level %d, want 1 to 8", ErrInvalidMessage, s.CongestionLevel)
+	case s.Type != SCMGTypeSSC && s.CongestionLevel != 0:
+		return b, fmt.Errorf("%w: %s carries no SCCP congestion level", ErrInvalidMessage, s.Type)
 	}
-}
-
-// MarshalBinary returns the byte sequence generated from a SCMG instance.
-func (s *SCMG) MarshalBinary() ([]byte, error) {
-	b := make([]byte, s.MarshalLen())
-	if err := s.MarshalTo(b); err != nil {
-		return nil, err
+	b = append(b, byte(s.Type), s.AffectedSSN, byte(s.AffectedPointCode), byte(s.AffectedPointCode>>8), s.SubsystemMultiplicityIndicator)
+	if s.Type == SCMGTypeSSC {
+		b = append(b, s.CongestionLevel)
 	}
-
 	return b, nil
 }
 
-// MarshalTo puts the byte sequence in the byte array given as b.
-func (s *SCMG) MarshalTo(b []byte) error {
-	l := len(b)
+// MarshalBinary encodes the SCMG message.
+func (s SCMG) MarshalBinary() ([]byte, error) { return s.AppendBinary(nil) }
 
-	if l < s.MarshalLen() {
-		return io.ErrUnexpectedEOF
-	}
-
-	b[0] = uint8(s.Type)
-	b[1] = s.AffectedSSN
-	binary.LittleEndian.PutUint16(b[2:4], s.AffectedPC)
-	b[4] = s.SubsystemMultiplicityIndicator
-	if s.Type == SCMGTypeSSC {
-		b[5] = s.SCCPCongestionLevel
-	}
-
-	return nil
-}
-
-// ParseSCMG decodes given byte sequence as a SCMG.
-func ParseSCMG(b []byte) (*SCMG, error) {
-	s := &SCMG{}
-	if err := s.UnmarshalBinary(b); err != nil {
-		return nil, err
-	}
-
-	return s, nil
-}
-
-// UnmarshalBinary sets the values retrieved from byte sequence in a SCMG.
+// UnmarshalBinary decodes an SCMG message. Spare bits are not examined (ITU-T
+// Q.714 (05/01) §1.1.4.4) and octets after the message are ignored. On error
+// the receiver is left unchanged.
 func (s *SCMG) UnmarshalBinary(b []byte) error {
-	l := len(b)
-	if l < 5 {
-		return io.ErrUnexpectedEOF
+	if len(b) < 5 {
+		return fmt.Errorf("%w: SCMG: %w", ErrMalformedMessage, io.ErrUnexpectedEOF)
 	}
-
-	s.Type = SCMGType(b[0])
-	s.AffectedSSN = b[1]
-	s.AffectedPC = binary.LittleEndian.Uint16(b[2:4])
-	s.SubsystemMultiplicityIndicator = b[4]
-
-	if s.Type == SCMGTypeSSC {
-		if l < 6 {
-			return io.ErrUnexpectedEOF
+	v := SCMG{
+		Type:                           SCMGType(b[0]),
+		AffectedSSN:                    b[1],
+		AffectedPointCode:              (uint16(b[2]) | uint16(b[3])<<8) & params.MaxPointCode,
+		SubsystemMultiplicityIndicator: b[4] & 0x03,
+	}
+	switch v.Type {
+	case SCMGTypeSSA, SCMGTypeSSP, SCMGTypeSST, SCMGTypeSOR, SCMGTypeSOG:
+	case SCMGTypeSSC:
+		if len(b) < 6 {
+			return fmt.Errorf("%w: SSC congestion level: %w", ErrMalformedMessage, io.ErrUnexpectedEOF)
 		}
-		s.SCCPCongestionLevel = b[5]
+		v.CongestionLevel = b[5] & 0x0f
+	default:
+		return fmt.Errorf("%w: unknown SCMG format identifier %#02x", ErrMalformedMessage, b[0])
 	}
-
+	*s = v
 	return nil
 }
 
-// MarshalLen returns the serial length.
-func (s *SCMG) MarshalLen() int {
-	// ITU-T Q.713 (03/01), Table 24: SCMG messages.
-	l := 5
-
-	// ITU-T Q.713 (03/01), Table 25: SSC.
+// String returns the message in a human readable form.
+func (s SCMG) String() string {
+	str := fmt.Sprintf("%s{AffectedSSN: %d, AffectedPointCode: %d, SMI: %d", s.Type, s.AffectedSSN, s.AffectedPointCode, s.SubsystemMultiplicityIndicator)
 	if s.Type == SCMGTypeSSC {
-		l += 1
+		str += fmt.Sprintf(", CongestionLevel: %d", s.CongestionLevel)
 	}
-
-	return l
-}
-
-// String returns the SCMG values in human readable format.
-func (s *SCMG) String() string {
-	return fmt.Sprintf("%s: {AffectedSSN: %v, AffectedPC: %v, SubsystemMultiplicityIndicator: %d, SCCPCongestionLevel: %d}",
-		s.Type,
-		s.AffectedSSN,
-		s.AffectedPC,
-		s.SubsystemMultiplicityIndicator,
-		s.SCCPCongestionLevel,
-	)
-}
-
-// MessageType returns the Message Type in int.
-func (s *SCMG) MessageType() SCMGType {
-	return s.Type
-}
-
-// MessageTypeName returns the Message Type in string.
-func (s *SCMG) MessageTypeName() string {
-	return s.Type.String()
+	return str + "}"
 }
