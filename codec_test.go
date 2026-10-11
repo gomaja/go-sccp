@@ -651,6 +651,10 @@ func TestSCMG(t *testing.T) {
 		{sccp.SCMG{Type: sccp.SCMGTypeSST, AffectedSSN: 8, AffectedPointCode: 0x1234}, "03 08 3412 00"},
 		{sccp.SCMG{Type: sccp.SCMGTypeSSA, AffectedSSN: 6, AffectedPointCode: 0x3fff, SubsystemMultiplicityIndicator: 3}, "01 06 ff3f 03"},
 		{sccp.SCMG{Type: sccp.SCMGTypeSSC, AffectedSSN: 1, AffectedPointCode: 0x0102, CongestionLevel: 8}, "06 01 0201 00 08"},
+		// Implementors' Guide (03/2002) for Q.713 (03/01): bits 6-5 of the
+		// congestion level octet are the affected SCCP service.
+		{sccp.SCMG{Type: sccp.SCMGTypeSSC, AffectedSSN: 1, AffectedPointCode: 0x0102, CongestionLevel: 5, AffectedService: sccp.SCCPServiceConnectionless}, "06 01 0201 00 15"},
+		{sccp.SCMG{Type: sccp.SCMGTypeSSC, AffectedSSN: 1, AffectedPointCode: 0x0102, CongestionLevel: 1, AffectedService: sccp.SCCPServiceConnectionOriented}, "06 01 0201 00 21"},
 	}
 	for _, tt := range tests {
 		want := unhex(t, tt.wire)
@@ -664,13 +668,20 @@ func TestSCMG(t *testing.T) {
 		}
 	}
 	// Q.714 §1.1.4.4: spare bits are not examined. Q.713 §5.2.2 to §5.2.4:
-	// point code bits 15-16, SMI bits 3-8 and congestion bits 5-8 are spare.
+	// point code bits 15-16, SMI bits 3-8 and congestion bits 7-8 are spare;
+	// the reserved affected service 11 is reset to both services (§1.1.4.3).
 	var s sccp.SCMG
 	if err := s.UnmarshalBinary(unhex(t, "06 06 34d2 fc f4 ff")); err != nil {
 		t.Fatal(err)
 	}
 	if want := (sccp.SCMG{Type: sccp.SCMGTypeSSC, AffectedSSN: 6, AffectedPointCode: 0x1234, CongestionLevel: 4}); s != want {
 		t.Errorf("spare bits examined: %v, want %v", s, want)
+	}
+	if err := s.UnmarshalBinary(unhex(t, "06 06 3412 00 d4")); err != nil {
+		t.Fatal(err)
+	}
+	if want := (sccp.SCMG{Type: sccp.SCMGTypeSSC, AffectedSSN: 6, AffectedPointCode: 0x1234, CongestionLevel: 4, AffectedService: sccp.SCCPServiceConnectionless}); s != want {
+		t.Errorf("affected service under spare bits 7-8: %v, want %v", s, want)
 	}
 	for _, invalid := range []sccp.SCMG{
 		{Type: 0}, {Type: 7},
@@ -679,6 +690,8 @@ func TestSCMG(t *testing.T) {
 		{Type: sccp.SCMGTypeSSA, CongestionLevel: 1},
 		{Type: sccp.SCMGTypeSSC, CongestionLevel: 0},
 		{Type: sccp.SCMGTypeSSC, CongestionLevel: 9},
+		{Type: sccp.SCMGTypeSSC, CongestionLevel: 1, AffectedService: 3},
+		{Type: sccp.SCMGTypeSSA, AffectedService: sccp.SCCPServiceConnectionless},
 	} {
 		if b, err := invalid.MarshalBinary(); !errors.Is(err, sccp.ErrInvalidMessage) {
 			t.Errorf("%v MarshalBinary = % x, %v; want ErrInvalidMessage", invalid, b, err)

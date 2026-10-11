@@ -17,10 +17,24 @@ Last verified: 2026-10-11.
 | Procedures | ITU-T Q.714 (05/01) | In force | Routing, connectionless and connection-oriented procedures |
 | User guide | ITU-T Q.715 (04/02) | In force | Length guidance (§8.3.2), return of segments (§8.3.1.6) |
 | Performance | ITU-T Q.716 (03/93) | In force | Not used by the code |
+| Corrections | Implementors' Guides (03/2002) for Q.711 (03/2001), Q.712 (07/1996), Q.713 (03/2001) and Q.714 (05/2001) | Published by Study Group 11 | The affected SCCP service of SSC (Q.713 guide) |
 
 Status was read from the ITU-T recommendation pages (https://www.itu.int/rec/T-REC-Q.711
 to Q.716): each lists the edition above as the only component in force and the
 earlier editions as superseded. Older editions are not valid baselines.
+
+The recommendation pages do not list the implementors' guides; the Study Group
+11 catalogue does (https://www.itu.int/itudoc/itu-t/com11/implgd/index.html).
+Each guide is "an additional authoritative source of information for
+implementors to be read in conjunction with the Recommendation itself". The four
+guides of 03/2002 let the connectionless and connection-oriented services
+report SCCP congestion separately: an "Affected SCCP service" field in bits 6-5
+of the SSC congestion level (Q.713 guide, Figure 13 and §5.2.4), an N-PCSTATE
+parameter (Q.711 guide) and the separate restriction levels and timers of the
+congestion procedures (Q.714 guide). The Q.714 guide also corrects §5.3.2.1: a
+subsystem-prohibited message answers a message for an unavailable local
+subsystem only when that message was routed on SSN. The codec carries the SSC
+field; the congestion and SCCP management procedures are not implemented.
 
 ## Wire conventions
 
@@ -36,6 +50,7 @@ earlier editions as superseded. Older editions are not valid baselines.
 | Protocol class bits 5-8 are the message handling code of classes 0 and 1: 1000 is return message on error; 0000 and the spare codes decode as no special options, the default (Q.714 §1.1.4.3). They are spare for classes 2 and 3 | Q.713 §3.6 |
 | Segmentation: F bit 8, in-sequence option bit 7, remaining segments bits 4-1 | Q.713 §3.17 |
 | End of optional parameters only when optional parameters are present | Q.713 §1.6 |
+| SSC congestion level octet: the level in bits 1-4, the affected SCCP service in bits 6-5 (11 reserved, decoded as both services), bits 7-8 spare | Q.713 §5.2.4 and Figure 13, as the Implementors' Guide (03/2002) modifies them |
 
 ## Decoding (liberal)
 
@@ -315,6 +330,8 @@ verified RFC 9260 errata concern SCTP, which go-sctp implements.
 ## Verification Sources
 
 - https://www.itu.int/rec/T-REC-Q.711, -Q.712, -Q.713, -Q.714, -Q.715, -Q.716
+- https://www.itu.int/itudoc/itu-t/com11/implgd/index.html and its pages
+  q711impl.html, q712impl.html, q713impl.html and q714impl.html
 - https://www.etsi.org/deliver/etsi_en/300001_300099/30000901/01.04.03_60/en_30000901v010403p.pdf
   (the published version; the index lists 01.04.02_20, 01.04.03_30 and
   01.04.03_60)
