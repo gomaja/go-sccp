@@ -707,7 +707,7 @@ func (s *Stack) reassemble(now time.Time, u *unitdata, ssn uint8, res *Result) {
 	}
 
 	if seg.FirstSegment {
-		if s.reassemblySlots >= s.cfg.MaxReassemblies || s.reassemblyOctets+len(u.data) > s.cfg.MaxReassemblyOctets {
+		if s.reassemblySlots >= s.cfg.MaxReassemblies || !s.roomFor(key.label.OPC, len(u.data)) {
 			// §4.1.1.2.3.4: no buffer space to perform reassembly.
 			s.rejectSegment(now, key, u, params.ReturnCauseNetworkCongestion,
 				fmt.Errorf("%w: no buffer space for reference %#06x", ErrReassembly, key.reference), res)
@@ -732,7 +732,7 @@ func (s *Stack) reassemble(now time.Time, u *unitdata, ssn uint8, res *Result) {
 		p.first.data = nil
 		s.reassemblies[key] = p
 		s.reassemblySlots++
-		s.reassemblyOctets += len(u.data)
+		s.hold(key.label.OPC, len(u.data))
 		p.timer = s.schedule(now.Add(s.cfg.ReassemblyTimeout), func(now time.Time, res *Result) {
 			// §4.1.1.2.1 and §4.1.1.2.3.2: T(reassembly) expiry discards the
 			// message and is an error in message transport.
@@ -773,7 +773,7 @@ func (s *Stack) reassemble(now time.Time, u *unitdata, ssn uint8, res *Result) {
 			fmt.Errorf("%w: %d octets exceed %d", ErrReassembly, total, MaxLongData), res)
 		res.discard(u.label, u.typ, fmt.Errorf("%w: message too long", ErrReassembly))
 		return
-	case s.reassemblyOctets+len(u.data) > s.cfg.MaxReassemblyOctets:
+	case !s.roomFor(key.label.OPC, len(u.data)):
 		// §4.1.1.2.3.4: no buffer space to perform reassembly.
 		s.failReassembly(now, p, params.ReturnCauseNetworkCongestion,
 			fmt.Errorf("%w: no buffer space for reference %#06x", ErrReassembly, key.reference), res)
@@ -785,7 +785,7 @@ func (s *Stack) reassemble(now time.Time, u *unitdata, ssn uint8, res *Result) {
 	data := make([]byte, total)
 	copy(data[copy(data, p.data):], u.data)
 	p.data = data
-	s.reassemblyOctets += len(u.data)
+	s.hold(key.label.OPC, len(u.data))
 	if seg.RemainingSegments > 0 {
 		p.expected--
 		return
@@ -841,7 +841,7 @@ func (s *Stack) rejectSegment(now time.Time, key reassemblyKey, u *unitdata, cau
 func (s *Stack) failReassembly(now time.Time, p *reassembly, cause params.ReturnCause, reason error, res *Result) {
 	first := p.firstSegment()
 	s.reject(first, p.returnOnError, cause, reason, res)
-	s.reassemblyOctets -= len(p.data)
+	s.hold(p.key.label.OPC, -len(p.data))
 	*p = reassembly{key: p.key, failed: true, firstKnown: true, firstHash: s.segmentHash(first), timer: p.timer}
 	s.stop(p.timer)
 	p.timer = s.schedule(now.Add(s.cfg.ReassemblyTimeout), func(time.Time, *Result) { s.endReassembly(p) })
@@ -856,7 +856,26 @@ func (s *Stack) endReassembly(p *reassembly) {
 		s.orphanRecords--
 	} else {
 		s.reassemblySlots--
-		s.reassemblyOctets -= len(p.data)
+		s.hold(p.key.label.OPC, -len(p.data))
 	}
 	s.stop(p.timer)
+}
+
+// roomFor reports whether the processes can hold n more octets of user data
+// from the signalling point opc: within MaxReassemblyOctets and
+// MaxReassemblyOctetsPerPeer (ITU-T Q.714 (05/01) §4.1.1.2.3.4).
+func (s *Stack) roomFor(opc uint32, n int) bool {
+	perPeer := s.cfg.MaxReassemblyOctetsPerPeer
+	return s.reassemblyOctets+n <= s.cfg.MaxReassemblyOctets && (perPeer == 0 || s.peerOctets[opc]+n <= perPeer)
+}
+
+// hold accounts for n more octets of user data held for the signalling point
+// opc, or fewer when n is negative.
+func (s *Stack) hold(opc uint32, n int) {
+	s.reassemblyOctets += n
+	if v := s.peerOctets[opc] + n; v != 0 {
+		s.peerOctets[opc] = v
+	} else {
+		delete(s.peerOctets, opc)
+	}
 }

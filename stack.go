@@ -258,6 +258,16 @@ type StackConfig struct {
 	MaxReassemblies     int
 	MaxReassemblyOctets int
 
+	// MaxReassemblyOctetsPerPeer bounds the user data the processes of one
+	// signalling point hold, the OPC of the routing label their segments
+	// arrive with, so that one peer cannot take the whole of
+	// MaxReassemblyOctets. Beyond it, as beyond MaxReassemblyOctets, the
+	// reassembly ends with the cause network congestion. Zero sets no bound
+	// per peer: in a network routed on global title, segments arrive from
+	// the relay that translated them, so a bound per peer would bound most
+	// of the traffic.
+	MaxReassemblyOctetsPerPeer int
+
 	// LocalGlobalTitle reports whether a called party address routed on
 	// global title addresses this node. The message is then delivered to the
 	// subsystem number of the address, the result of the final translation
@@ -303,6 +313,7 @@ type Stack struct {
 	// records of messages that failed with no process are counted apart.
 	reassemblies     map[reassemblyKey]*reassembly
 	reassemblyOctets int
+	peerOctets       map[uint32]int // reassemblyOctets by OPC
 	reassemblySlots  int
 	orphanRecords    int
 	segmentSeed      maphash.Seed
@@ -340,7 +351,7 @@ func NewStack(cfg StackConfig) (*Stack, error) {
 		return nil, fmt.Errorf("%w: hop counter %d exceeds %d", ErrInvalidRequest, cfg.HopCounter, params.MaxHopCounter)
 	case cfg.SegmentationThreshold != 0 && cfg.SegmentationThreshold < MinSegmentationThreshold:
 		return nil, fmt.Errorf("%w: segmentation threshold %d below %d", ErrInvalidRequest, cfg.SegmentationThreshold, MinSegmentationThreshold)
-	case cfg.SegmentationReferenceFreeze < 0, cfg.ReassemblyTimeout < 0, cfg.MaxReassemblies < 0, cfg.MaxReassemblyOctets < 0:
+	case cfg.SegmentationReferenceFreeze < 0, cfg.ReassemblyTimeout < 0, cfg.MaxReassemblies < 0, cfg.MaxReassemblyOctets < 0, cfg.MaxReassemblyOctetsPerPeer < 0:
 		return nil, fmt.Errorf("%w: negative timer or limit", ErrInvalidRequest)
 	}
 	s := &Stack{
@@ -350,6 +361,7 @@ func NewStack(cfg StackConfig) (*Stack, error) {
 		nextSegmentationReference: 1,
 		frozenSegmentation:        make(map[uint32]time.Time),
 		reassemblies:              make(map[reassemblyKey]*reassembly),
+		peerOctets:                make(map[uint32]int),
 		segmentSeed:               maphash.MakeSeed(),
 	}
 	if err := s.initConnections(); err != nil {
