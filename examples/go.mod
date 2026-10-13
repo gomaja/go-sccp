@@ -3,9 +3,9 @@ module github.com/gomaja/go-sccp/examples
 go 1.26
 
 require (
-	github.com/gomaja/go-m3ua v1.3.1-0.20261010214351-e05bb5c83207
+	github.com/gomaja/go-m3ua v0.0.0-20261013190641-9c90e4c48c7a
 	github.com/gomaja/go-sccp v0.0.0
-	github.com/gomaja/go-sctp v1.1.1-0.20261010090839-614ae6465de4
+	github.com/gomaja/go-sctp v0.0.0-20261013061924-51d016bab120
 )
 
 // The examples build against the library in the same commit.

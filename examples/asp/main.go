@@ -215,7 +215,7 @@ func address(digits string, ssn uint8) (params.PartyAddress, error) {
 }
 
 // transfer sends one SCCP message as M3UA DATA, retrying while the
-// association is still being activated.
+// association is still being activated. Cancelling ctx abandons the send.
 func transfer(ctx context.Context, endpoint *m3ua.Endpoint, tr sccp.TransferRequest, ni uint8) {
 	request := m3ua.MTPTransferRequest{
 		MTPRoute: "sccp",
@@ -223,9 +223,13 @@ func transfer(ctx context.Context, endpoint *m3ua.Endpoint, tr sccp.TransferRequ
 			tr.OPC, tr.DPC, m3params.ServiceIndSCCP, ni, 0, tr.SLS, tr.Data),
 	}
 	for attempt := 0; ; attempt++ {
-		_, err := endpoint.MTPTransfer(request)
+		_, err := endpoint.MTPTransferContext(ctx, request)
 		if err == nil {
 			log.Printf("Sent %s: %d octets, SLS %d", tr.Message.MessageType(), len(tr.Data), tr.SLS)
+			return
+		}
+		if ctx.Err() != nil {
+			log.Printf("MTP-TRANSFER of %s abandoned: %s", tr.Message.MessageType(), err)
 			return
 		}
 		var selection *m3ua.MTPSelectionError

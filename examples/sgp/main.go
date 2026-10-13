@@ -75,7 +75,7 @@ func main() {
 	// Reassembly timer expiries return XUDTS messages; they go out on the
 	// association the first segment came from.
 	routes := newReplyRoutes()
-	go stack.RunTimers(ctx, func(res sccp.Result) { deliver(stack, res, routes) })
+	go stack.RunTimers(ctx, func(res sccp.Result) { deliver(ctx, stack, res, routes) })
 
 	go func() {
 		for {
@@ -112,14 +112,16 @@ func serve(ctx context.Context, stack *sccp.Stack, association *m3ua.Association
 		}
 		pd := message.ProtocolData
 		routes.learn(pd.OriginatingPointCode, reply{association: association, as: message.AS, ni: pd.NetworkIndicator})
-		deliver(stack, stack.HandleTransfer(sccp.TransferIndication{
+		deliver(ctx, stack, stack.HandleTransfer(sccp.TransferIndication{
 			RoutingLabel: sccp.RoutingLabel{OPC: pd.OriginatingPointCode, DPC: pd.DestinationPointCode, SLS: pd.SignallingLinkSelection},
 			Data:         pd.Data,
 		}), routes)
 	}
 }
 
-func deliver(stack *sccp.Stack, res sccp.Result, routes *replyRoutes) {
+// deliver prints what the stack produced and sends its messages back to the
+// peers they are addressed to. Cancelling ctx abandons the sends.
+func deliver(ctx context.Context, stack *sccp.Stack, res sccp.Result, routes *replyRoutes) {
 	for _, ind := range res.Indications {
 		switch ind := ind.(type) {
 		case *sccp.UnitdataIndication:
@@ -134,7 +136,7 @@ func deliver(stack *sccp.Stack, res sccp.Result, routes *replyRoutes) {
 				continue
 			}
 			log.Printf("Refused a connection request from %d", ind.OPC)
-			deliver(stack, refusal, routes)
+			deliver(ctx, stack, refusal, routes)
 		case *sccp.MaintenanceIndication:
 			log.Printf("Maintenance: %s from %d: %s", ind.MessageType, ind.OPC, ind.Reason)
 		}
@@ -148,7 +150,7 @@ func deliver(stack *sccp.Stack, res sccp.Result, routes *replyRoutes) {
 			log.Printf("No association towards %d for %s", tr.DPC, tr.Message.MessageType())
 			continue
 		}
-		_, err := r.association.WriteData(m3ua.DataRequest{
+		_, err := r.association.WriteDataContext(ctx, m3ua.DataRequest{
 			AS:           r.as,
 			ProtocolData: *m3params.NewProtocolDataPayload(tr.OPC, tr.DPC, m3params.ServiceIndSCCP, r.ni, 0, tr.SLS, tr.Data),
 		})
