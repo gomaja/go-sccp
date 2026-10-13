@@ -194,7 +194,10 @@ fits.
   - destination cannot perform reassembly (§4.1.1.2.3.1): a total above 3952
     octets, which LUDT segments can reach;
   - network congestion (§4.1.1.2.3.4): no room within the bounds on processes
-    and buffered octets;
+    and buffered octets, in total and, when `MaxReassemblyOctetsPerPeer` is
+    set, for the signalling point (OPC) the segments come from. That bound is
+    off by default: in a network routed on global title, segments arrive from
+    the relay that translated them;
   - subsystem failure or unequipped user (§2.3.1 item 2 b)): a segment for a
     prohibited or unknown subsystem, whichever segment it is.
 

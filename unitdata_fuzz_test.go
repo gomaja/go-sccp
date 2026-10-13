@@ -7,6 +7,7 @@ package sccp
 import (
 	"encoding/binary"
 	"errors"
+	"maps"
 	"testing"
 	"time"
 
@@ -49,7 +50,8 @@ func FuzzUnitdataTransfer(f *testing.F) {
 
 	f.Fuzz(func(t *testing.T, script []byte) {
 		now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-		s, err := NewStack(StackConfig{PointCode: 2, MaxReassemblies: 3, MaxReassemblyOctets: 600, ReassemblyTimeout: 10 * time.Second, Now: func() time.Time { return now }})
+		s, err := NewStack(StackConfig{PointCode: 2, MaxReassemblies: 3, MaxReassemblyOctets: 600, MaxReassemblyOctetsPerPeer: 400,
+			ReassemblyTimeout: 10 * time.Second, Now: func() time.Time { return now }})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -81,6 +83,7 @@ func FuzzUnitdataTransfer(f *testing.F) {
 				}
 			}
 			slots, orphans, octets := 0, 0, 0
+			peers := make(map[uint32]int)
 			for key, p := range s.reassemblies {
 				switch {
 				case p.key != key:
@@ -97,6 +100,7 @@ func FuzzUnitdataTransfer(f *testing.F) {
 					// A process, or the record that took its place.
 					slots++
 					octets += len(p.data)
+					peers[key.label.OPC] += len(p.data)
 					if !p.failed && (len(p.data) > p.bound || len(p.data) > MaxLongData || p.firstLen > len(p.data)) {
 						t.Fatalf("process holds %d octets, first %d, bound %d", len(p.data), p.firstLen, p.bound)
 					}
@@ -106,6 +110,16 @@ func FuzzUnitdataTransfer(f *testing.F) {
 				octets != s.reassemblyOctets || octets > s.cfg.MaxReassemblyOctets {
 				t.Fatalf("%d slots hold %d octets (accounted %d slots, %d octets), %d records of messages with no process (accounted %d)",
 					slots, octets, s.reassemblySlots, s.reassemblyOctets, orphans, s.orphanRecords)
+			}
+			for opc, held := range peers {
+				if held == 0 {
+					delete(peers, opc)
+				} else if held > s.cfg.MaxReassemblyOctetsPerPeer {
+					t.Fatalf("peer %d holds %d octets, more than %d", opc, held, s.cfg.MaxReassemblyOctetsPerPeer)
+				}
+			}
+			if !maps.Equal(peers, s.peerOctets) {
+				t.Fatalf("octets by peer %v, accounted %v", peers, s.peerOctets)
 			}
 		}
 		for len(script) > 0 {
@@ -119,8 +133,9 @@ func FuzzUnitdataTransfer(f *testing.F) {
 				n := min(int(binary.LittleEndian.Uint16(script)), len(script)-2)
 				msg := script[2 : 2+n]
 				script = script[2+n:]
-				// Bit 4 moves the message to another link: another SLS.
-				check(s.HandleTransfer(TransferIndication{RoutingLabel: RoutingLabel{OPC: 1, DPC: 2, SLS: op >> 4 & 1}, Data: msg}))
+				// Bit 4 moves the message to another link, another SLS; bit 5
+				// to another peer, another OPC.
+				check(s.HandleTransfer(TransferIndication{RoutingLabel: RoutingLabel{OPC: 1 + uint32(op>>5&1), DPC: 2, SLS: op >> 4 & 1}, Data: msg}))
 			case 2:
 				now = now.Add(time.Duration(op>>2) * time.Second)
 				check(s.HandleTimeout())
@@ -135,7 +150,7 @@ func FuzzUnitdataTransfer(f *testing.F) {
 		// for one more period.
 		now = now.Add(time.Hour)
 		check(s.HandleTimeout())
-		if len(s.reassemblies) != 0 || s.reassemblyOctets != 0 || s.reassemblySlots != 0 || s.orphanRecords != 0 {
+		if len(s.reassemblies) != 0 || s.reassemblyOctets != 0 || len(s.peerOctets) != 0 || s.reassemblySlots != 0 || s.orphanRecords != 0 {
 			t.Fatalf("after every timer: %d entries, %d octets, %d slots, %d records", len(s.reassemblies), s.reassemblyOctets, s.reassemblySlots, s.orphanRecords)
 		}
 	})

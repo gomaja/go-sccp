@@ -1267,6 +1267,54 @@ func TestGlobalTitleCallbackGetsACopy(t *testing.T) {
 	}
 }
 
+// TestReassemblyBoundPerPeer checks StackConfig.MaxReassemblyOctetsPerPeer:
+// the processes of one signalling point hold at most that much user data;
+// beyond it the reassembly ends with the cause network congestion (ITU-T
+// Q.714 (05/01) §4.1.1.2.3.4), and the other signalling points keep theirs.
+func TestReassemblyBoundPerPeer(t *testing.T) {
+	const pcC = 0x0303
+	clock := newClock()
+	a := newStack(t, clock, pcA, sccp.StackConfig{})
+	c := newStack(t, clock, pcC, sccp.StackConfig{})
+	// 450 octets travel as two segments of 225: exactly the bound.
+	b := newStack(t, clock, pcB, sccp.StackConfig{MaxReassemblyOctetsPerPeer: 450}, 8)
+	if u := onlyUnitdata(t, deliver(b, mustUnitdata(t, a, request(payload(450)))...)); len(u.Data) != 450 {
+		t.Fatalf("450 octets: %+v", u)
+	}
+
+	// One octet more fails at the last segment, and frees what it held.
+	tr := mustUnitdata(t, a, request(payload(451)))
+	r := deliver(b, tr...)
+	if len(r.Indications) != 0 || len(r.Transfers) != 1 || r.Transfers[0].Message.(*sccp.XUDTS).ReturnCause != params.ReturnCauseNetworkCongestion {
+		t.Fatalf("451 octets from one peer: %+v", r)
+	}
+
+	// Two messages in progress from A take its whole share: a third is
+	// refused at its first segment, while C reassembles as much.
+	first := mustUnitdata(t, a, request(payload(450)))
+	second := mustUnitdata(t, a, request(payload(450)))
+	deliver(b, first[0], second[0])
+	if ret := onlyReturn(t, deliver(b, mustUnitdata(t, a, request(payload(450)))[0])); ret.Message.(*sccp.XUDTS).ReturnCause != params.ReturnCauseNetworkCongestion {
+		t.Fatalf("third message from A: %v", ret.Message)
+	}
+	if u := onlyUnitdata(t, deliver(b, mustUnitdata(t, c, request(payload(450)))...)); u.OPC != pcC {
+		t.Fatalf("message from C: %+v", u)
+	}
+	// A's second message cannot grow beyond the share; the first completes
+	// and gives its octets back.
+	if r := deliver(b, second[1]); len(r.Indications) != 0 || len(r.Transfers) != 1 {
+		t.Fatalf("second message from A over its share: %+v", r)
+	}
+	onlyUnitdata(t, deliver(b, first[1]))
+	onlyUnitdata(t, deliver(b, mustUnitdata(t, a, request(payload(450)))...))
+
+	// T(reassembly) expiry gives the octets back too.
+	deliver(b, mustUnitdata(t, a, request(payload(450)))[0])
+	clock.Advance(sccp.DefaultReassemblyTimeout)
+	b.HandleTimeout()
+	onlyUnitdata(t, deliver(b, mustUnitdata(t, a, request(payload(450)))...))
+}
+
 // TestReassemblyReturnsOnce checks ITU-T Q.714 (05/01) §4.2: "When the
 // XUDTS/LUDTS is a result of a reassembly error (see 4.1.1.2.3), then only one
 // XUDTS/LUDTS message will be sent", with a sender that asks for return in
@@ -1438,6 +1486,7 @@ func TestNewStackRejectsInvalidConfig(t *testing.T) {
 		{HopCounter: 16},
 		{ReassemblyTimeout: -1},
 		{MaxReassemblies: -1},
+		{MaxReassemblyOctetsPerPeer: -1},
 	} {
 		if _, err := sccp.NewStack(cfg); !errors.Is(err, sccp.ErrInvalidRequest) {
 			t.Errorf("NewStack(%+v) = %v", cfg, err)
