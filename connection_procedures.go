@@ -92,7 +92,7 @@ func (s *Stack) handleConnectionOriented(now time.Time, label RoutingLabel, m Me
 	// CC/CREF have N/A in the source-reference and OPC columns, Table B.2.
 	// ITU-T Q.714 (05/01) §3.1.4.2 items 1, 3: c3 has no associated peer yet.
 	checkPeer := c.State != ConnectionOutgoingPending && m.MessageType() != MsgTypeCC && m.MessageType() != MsgTypeCREF
-	if checkPeer && label.OPC != c.Remote.DPC {
+	if checkPeer && (label.OPC != c.Remote.DPC || label.NI != c.Remote.NI) {
 		s.connectionMismatch(now, label, m, c, params.ErrorCausePointCodeMismatch, res)
 		return
 	}
@@ -295,7 +295,9 @@ func (s *Stack) receiveConnectionSetup(now time.Time, label RoutingLabel, c *con
 		s.stop(c.establishment)
 		c.establishment = nil
 		c.RemoteReference = m.SourceLocalReference
-		c.Remote.DPC = label.OPC // §3.1.4.2 item 3: associate the confirming signalling point.
+		// §3.1.4.2 item 3: associate the confirming signalling point.
+		c.Remote.DPC = label.OPC
+		c.Remote.NI = label.NI
 		if m.ProtocolClass.Class != 2 {
 			res.discard(label, MsgTypeCC, fmt.Errorf("%w: class %d confirmation", ErrConnectionState, m.ProtocolClass.Class))
 		}

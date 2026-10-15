@@ -16,17 +16,37 @@ import (
 	"github.com/gomaja/go-sccp/params"
 )
 
+// NetworkIndicator is the network indicator of the service information
+// octet, ITU-T Q.704 (07/96) §14.2.2. It identifies the network in which
+// point codes are meaningful.
+type NetworkIndicator uint8
+
+// Network indicators, ITU-T Q.704 (07/96) §14.2.2.
+const (
+	NIInternational    NetworkIndicator = 0 // international network
+	NISpare            NetworkIndicator = 1 // spare (for international use only)
+	NINational         NetworkIndicator = 2 // national network
+	NINationalReserved NetworkIndicator = 3 // reserved for national use
+)
+
 // RoutingLabel is the MTP routing information of a message: the routing label
-// of ITU-T Q.704 §2.2 (destination and originating point codes, signalling
-// link selection), as M3UA protocol data carries it (RFC 4666 §3.3.1).
+// (ITU-T Q.704 (07/96) §2.2) and the network indicator of the SIO (§14.2.2),
+// as MTP-TRANSFER (ITU-T Q.711 (03/01) Table 18) and M3UA protocol data
+// (RFC 4666 §3.3.1) carry them. Point codes are meaningful only in the network
+// NI names (ITU-T Q.711 (03/01) §6.1.1.2.2).
 type RoutingLabel struct {
+	// OPC and DPC are 14-bit originating and destination point codes,
+	// ITU-T Q.704 (07/96) §§2.2.2-2.2.3.
 	OPC uint32
 	DPC uint32
+	// SLS is the 4-bit signalling link selection, ITU-T Q.704 (07/96) §2.2.4.
 	SLS uint8
+	// NI is the 2-bit network indicator, ITU-T Q.704 (07/96) §14.2.2.
+	NI NetworkIndicator
 }
 
 // TransferIndication is an MTP-TRANSFER indication, ITU-T Q.711 (03/01)
-// §7.2.1: an SCCP message received from the MTP with its routing label.
+// §7.2.1: an SCCP message received from the MTP with its routing information.
 type TransferIndication struct {
 	RoutingLabel
 	// Data is the encoded SCCP message. The stack does not retain it.
@@ -34,7 +54,7 @@ type TransferIndication struct {
 }
 
 // TransferRequest is an MTP-TRANSFER request, ITU-T Q.711 (03/01) §7.2.1: an
-// SCCP message for the MTP to send with the given routing label.
+// SCCP message for the MTP to send with the given routing information.
 type TransferRequest struct {
 	RoutingLabel
 	// Message is the message Data encodes.
@@ -121,7 +141,8 @@ type Discard struct {
 	// could not be decoded it is the first octet received, 0 when there was
 	// none.
 	MessageType MsgType
-	// Reason matches one of the reasons below with errors.Is, or for the
+	// Reason matches one of the reasons below with errors.Is,
+	// ErrInvalidRequest for invalid MTP routing information, or for the
 	// connection-oriented procedures ErrConnectionNotFound,
 	// ErrConnectionReference or ErrConnectionState.
 	Reason error
@@ -173,7 +194,8 @@ var (
 
 // Errors returned for requests.
 var (
-	// ErrInvalidRequest reports a primitive whose parameters the stack refuses.
+	// ErrInvalidRequest reports a primitive whose parameters the stack refuses,
+	// or a Discard for received MTP routing information outside its field widths.
 	ErrInvalidRequest = errors.New("sccp: invalid request")
 
 	// ErrSegmentation reports user data that cannot be segmented: longer than
@@ -214,8 +236,15 @@ const (
 // default.
 type StackConfig struct {
 	// PointCode is the signalling point code of this node: the OPC of the
-	// messages it originates.
+	// messages it originates. It has 14 bits, ITU-T Q.704 (07/96) §2.2.3.
 	PointCode uint32
+
+	// NetworkIndicator is the network of messages originated for N-UNITDATA
+	// and N-CONNECT requests. Zero is the international network. The stack
+	// answers a received message in the network it came from. A node
+	// originating in several networks runs one Stack per network, each with
+	// its point code there (ITU-T Q.711 (03/01) §6.1.1.2.2).
+	NetworkIndicator NetworkIndicator
 
 	// MaxMessageSize is the largest SCCP message the stack sends, in octets.
 	// Zero selects DefaultMaxMessageSize, the narrowband MTP-SAP of ITU-T
@@ -260,13 +289,13 @@ type StackConfig struct {
 	MaxReassemblyOctets int
 
 	// MaxReassemblyOctetsPerPeer bounds the user data the processes of one
-	// signalling point hold, the OPC of the routing label their segments
-	// arrive with, so that one peer cannot take the whole of
-	// MaxReassemblyOctets. Beyond it, as beyond MaxReassemblyOctets, the
-	// reassembly ends with the cause network congestion. Zero sets no bound
-	// per peer: in a network routed on global title, segments arrive from
-	// the relay that translated them, so a bound per peer would bound most
-	// of the traffic.
+	// signalling point hold, identified in its network by the NI and OPC of
+	// the routing information their segments arrive with, so that one peer
+	// cannot take the whole of MaxReassemblyOctets. Beyond it, as beyond
+	// MaxReassemblyOctets, the reassembly ends with the cause network
+	// congestion. Zero sets no bound per peer: in a network routed on global
+	// title, segments arrive from the relay that translated them, so a bound
+	// per peer would bound most of the traffic.
 	MaxReassemblyOctetsPerPeer int
 
 	// LocalGlobalTitle reports whether a called party address routed on
@@ -314,7 +343,7 @@ type Stack struct {
 	// records of messages that failed with no process are counted apart.
 	reassemblies     map[reassemblyKey]*reassembly
 	reassemblyOctets int
-	peerOctets       map[uint32]int // reassemblyOctets by OPC
+	peerOctets       map[reassemblyPeer]int // reassemblyOctets by (NI, OPC)
 	reassemblySlots  int
 	orphanRecords    int
 	segmentSeed      maphash.Seed
@@ -346,6 +375,10 @@ func NewStack(cfg StackConfig) (*Stack, error) {
 		cfg.Now = time.Now
 	}
 	switch {
+	case cfg.PointCode > params.MaxPointCode:
+		return nil, fmt.Errorf("%w: point code %d exceeds %d", ErrInvalidRequest, cfg.PointCode, params.MaxPointCode)
+	case cfg.NetworkIndicator > NINationalReserved:
+		return nil, fmt.Errorf("%w: network indicator %d, want 0 to 3", ErrInvalidRequest, cfg.NetworkIndicator)
 	case cfg.MaxMessageSize < minMessageSize || cfg.MaxMessageSize > MaxBroadbandMessageSize:
 		return nil, fmt.Errorf("%w: maximum message size %d, want %d to %d", ErrInvalidRequest, cfg.MaxMessageSize, minMessageSize, MaxBroadbandMessageSize)
 	case cfg.HopCounter > params.MaxHopCounter:
@@ -362,7 +395,7 @@ func NewStack(cfg StackConfig) (*Stack, error) {
 		nextSegmentationReference: 1,
 		frozenSegmentation:        make(map[uint32]time.Time),
 		reassemblies:              make(map[reassemblyKey]*reassembly),
-		peerOctets:                make(map[uint32]int),
+		peerOctets:                make(map[reassemblyPeer]int),
 		segmentSeed:               maphash.MakeSeed(),
 	}
 	if err := s.initConnections(); err != nil {
@@ -413,9 +446,26 @@ func (s *Stack) SubsystemStatus(ssn uint8) (registered, available bool) {
 // LocalGlobalTitle is called before the stack is locked, so it may call the
 // Stack's methods.
 func (s *Stack) HandleTransfer(ind TransferIndication) Result {
-	m, err := ParseMessage(ind.Data)
+	// ITU-T Q.704 (07/96) §§2.2.1-2.2.4, §14.2.2: refuse values
+	// outside the standard routing label and network indicator fields.
+	var routingErr error
+	switch {
+	case ind.NI > NINationalReserved:
+		routingErr = fmt.Errorf("%w: network indicator %d, want 0 to 3", ErrInvalidRequest, ind.NI)
+	case ind.OPC > params.MaxPointCode:
+		routingErr = fmt.Errorf("%w: originating point code %d exceeds %d", ErrInvalidRequest, ind.OPC, params.MaxPointCode)
+	case ind.DPC > params.MaxPointCode:
+		routingErr = fmt.Errorf("%w: destination point code %d exceeds %d", ErrInvalidRequest, ind.DPC, params.MaxPointCode)
+	case ind.SLS > 15:
+		routingErr = fmt.Errorf("%w: signalling link selection %d, want 0 to 15", ErrInvalidRequest, ind.SLS)
+	}
+	var m Message
+	var err error
+	if routingErr == nil {
+		m, err = ParseMessage(ind.Data)
+	}
 	local := true
-	if err == nil && s.cfg.LocalGlobalTitle != nil {
+	if routingErr == nil && err == nil && s.cfg.LocalGlobalTitle != nil {
 		if called, ok := calledAddress(m); ok && called.GlobalTitle != nil {
 			// A copy: the callback must not reach the message the stack keeps.
 			local = s.cfg.LocalGlobalTitle(called.Clone())
@@ -427,6 +477,15 @@ func (s *Stack) HandleTransfer(ind TransferIndication) Result {
 	defer s.mu.Unlock()
 	var res Result
 	s.expire(now, &res)
+
+	if routingErr != nil {
+		t := MsgType(0)
+		if len(ind.Data) > 0 {
+			t = MsgType(ind.Data[0])
+		}
+		res.discard(ind.RoutingLabel, t, routingErr)
+		return res
+	}
 
 	if err != nil {
 		// ITU-T Q.714 (05/01) §1.1.4.2: a message with an unrecognized type
@@ -536,9 +595,10 @@ func (s *Stack) transfer(r *Result, label RoutingLabel, m Message) error {
 }
 
 // replyLabel routes a message back to the originator of a received one: to
-// its OPC, from the point code it was sent to, on the same link selection.
+// its OPC, from the point code it was sent to, on the same link selection
+// and in the same network.
 func replyLabel(received RoutingLabel) RoutingLabel {
-	return RoutingLabel{OPC: received.DPC, DPC: received.OPC, SLS: received.SLS}
+	return RoutingLabel{OPC: received.DPC, DPC: received.OPC, SLS: received.SLS, NI: received.NI}
 }
 
 // originLabel routes a message to the SCCP node that originated a received

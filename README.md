@@ -117,12 +117,12 @@ if err != nil {
 	log.Fatal(err) // sccp.ErrInvalidRequest or sccp.ErrSegmentation
 }
 for _, tr := range res.Transfers {
-	send(tr.OPC, tr.DPC, tr.SLS, tr.Data) // MTP-TRANSFER request, e.g. M3UA DATA
+	send(tr.OPC, tr.DPC, tr.SLS, tr.NI, tr.Data) // MTP-TRANSFER request, e.g. M3UA DATA
 }
 
-// Every message from the MTP, with its routing label.
+// Every message from the MTP, with its routing information.
 res = stack.HandleTransfer(sccp.TransferIndication{
-	RoutingLabel: sccp.RoutingLabel{OPC: opc, DPC: dpc, SLS: sls},
+	RoutingLabel: sccp.RoutingLabel{OPC: opc, DPC: dpc, SLS: sls, NI: ni},
 	Data:         payload,
 })
 for _, ind := range res.Indications {

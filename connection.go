@@ -162,8 +162,8 @@ type ConnectRequest struct {
 	// Importance is at most 4 in the CR (ITU-T Q.714 (05/01) §2.6.2 and
 	// Table 2).
 	Importance *params.Importance
-	// DPC is the point code of the SCCP node the CR goes to. Zero selects the
-	// point code of CalledPartyAddress.
+	// DPC is the 14-bit point code of the SCCP node the CR goes to. Zero
+	// selects the point code of CalledPartyAddress.
 	DPC uint32
 }
 
@@ -360,6 +360,10 @@ func (s *Stack) Connect(req ConnectRequest) (params.LocalReference, Result, erro
 		}
 		dpc = uint32(req.CalledPartyAddress.PointCode)
 	}
+	// ITU-T Q.704 (07/96) §§2.2.1-2.2.2: the DPC has 14 bits.
+	if dpc > params.MaxPointCode {
+		return 0, res, fmt.Errorf("%w: destination point code %d exceeds %d", ErrInvalidRequest, dpc, params.MaxPointCode)
+	}
 	if err := checkCalledAddress(req.CalledPartyAddress); err != nil {
 		return 0, res, err
 	}
@@ -380,7 +384,7 @@ func (s *Stack) Connect(req ConnectRequest) (params.LocalReference, Result, erro
 		return 0, res, err
 	}
 	m.SourceLocalReference = ref
-	label := RoutingLabel{OPC: s.cfg.PointCode, DPC: dpc, SLS: s.nextSLS}
+	label := RoutingLabel{OPC: s.cfg.PointCode, DPC: dpc, SLS: s.nextSLS, NI: s.cfg.NetworkIndicator}
 	if err := s.transfer(&res, label, m); err != nil {
 		return 0, res, fmt.Errorf("%w: %w", ErrInvalidRequest, err)
 	}
