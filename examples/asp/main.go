@@ -49,7 +49,7 @@ func main() {
 		wait        = flag.Duration("wait", 2*time.Second, "Time to wait for returned messages after the last request.")
 		opc         = flag.Uint("opc", 0x0101, "Point code of this node (ITU, 14 bits).")
 		dpc         = flag.Uint("dpc", 0x0202, "Point code of the destination SCCP node.")
-		ni          = flag.Uint("ni", 0, "MTP network indicator.")
+		ni          = flag.Uint("ni", 0, "MTP network indicator of the messages this node originates: 0 international, 2 national (ITU-T Q.704 §14.2.2).")
 		rc          = flag.Uint("routing-context", 1, "M3UA Routing Context.")
 		calledGT    = flag.String("called-gt", "447700900001", "Called party global title digits (E.164); empty routes on SSN.")
 		calledSSN   = flag.Uint("called-ssn", 6, "Called party subsystem number.")
@@ -77,6 +77,7 @@ func main() {
 
 	stack, err := sccp.NewStack(sccp.StackConfig{
 		PointCode:             uint32(*opc),
+		NetworkIndicator:      sccp.NetworkIndicator(*ni),
 		MaxMessageSize:        *maxMessage,
 		SegmentationThreshold: *segmentAtZ,
 	})
@@ -144,7 +145,7 @@ func main() {
 	send := func(res sccp.Result) {
 		report(res)
 		for _, tr := range res.Transfers {
-			transfer(signals, endpoint, tr, uint8(*ni))
+			transfer(signals, endpoint, tr)
 		}
 	}
 	go stack.RunTimers(signals, send)
@@ -156,7 +157,7 @@ func main() {
 			}
 			pd := message.ProtocolData
 			send(stack.HandleTransfer(sccp.TransferIndication{
-				RoutingLabel: sccp.RoutingLabel{OPC: pd.OriginatingPointCode, DPC: pd.DestinationPointCode, SLS: pd.SignallingLinkSelection},
+				RoutingLabel: sccp.RoutingLabel{OPC: pd.OriginatingPointCode, DPC: pd.DestinationPointCode, SLS: pd.SignallingLinkSelection, NI: sccp.NetworkIndicator(pd.NetworkIndicator)},
 				Data:         pd.Data,
 			}))
 		}
@@ -214,13 +215,14 @@ func address(digits string, ssn uint8) (params.PartyAddress, error) {
 	return params.NewGlobalTitleAddress(gt, ssn), nil
 }
 
-// transfer sends one SCCP message as M3UA DATA, retrying while the
-// association is still being activated. Cancelling ctx abandons the send.
-func transfer(ctx context.Context, endpoint *m3ua.Endpoint, tr sccp.TransferRequest, ni uint8) {
+// transfer sends one SCCP message as M3UA DATA in the network the stack
+// chose, retrying while the association is still being activated. Cancelling
+// ctx abandons the send.
+func transfer(ctx context.Context, endpoint *m3ua.Endpoint, tr sccp.TransferRequest) {
 	request := m3ua.MTPTransferRequest{
 		MTPRoute: "sccp",
 		ProtocolData: m3params.NewProtocolDataPayload(
-			tr.OPC, tr.DPC, m3params.ServiceIndSCCP, ni, 0, tr.SLS, tr.Data),
+			tr.OPC, tr.DPC, m3params.ServiceIndSCCP, uint8(tr.NI), 0, tr.SLS, tr.Data),
 	}
 	for attempt := 0; ; attempt++ {
 		_, err := endpoint.MTPTransferContext(ctx, request)
@@ -232,8 +234,7 @@ func transfer(ctx context.Context, endpoint *m3ua.Endpoint, tr sccp.TransferRequ
 			log.Printf("MTP-TRANSFER of %s abandoned: %s", tr.Message.MessageType(), err)
 			return
 		}
-		var selection *m3ua.MTPSelectionError
-		if attempt == 50 || !errors.As(err, &selection) {
+		if _, selection := errors.AsType[*m3ua.MTPSelectionError](err); attempt == 50 || !selection {
 			log.Printf("MTP-TRANSFER of %s failed: %s", tr.Message.MessageType(), err)
 			return
 		}

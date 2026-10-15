@@ -1,8 +1,8 @@
-github.com/gomaja/go-m3ua v0.0.0-20261013190641-9c90e4c48c7a h1:42J1ZuuqGHAmMQdBtFK7mK6UNGake+DiuEyhHG1yW6A=
-github.com/gomaja/go-m3ua v0.0.0-20261013190641-9c90e4c48c7a/go.mod h1:jInRL7wXg7NnwnjGsvfhjYGfwmTbSbv+13PJG522VO0=
-github.com/gomaja/go-sctp v0.0.0-20261013061924-51d016bab120 h1:43AezJe/L1iI6OijlT4559/4WvxUNa0HSuz9Zd337C8=
-github.com/gomaja/go-sctp v0.0.0-20261013061924-51d016bab120/go.mod h1:++BMUqs1e9AH4YU9j6fsualvD9HhppbbJ3MLnpmjrGA=
+github.com/gomaja/go-ctxsync v0.0.0-20261014212015-de26fb453109 h1:Gtss4S+dHo2G5OaLQTie3Jxxao+Mm++1jQArPw6xyto=
+github.com/gomaja/go-ctxsync v0.0.0-20261014212015-de26fb453109/go.mod h1:DHmXkdnCX0SXFMVg+lQy+VX3T+8wOl9pyHL59VMzcPw=
+github.com/gomaja/go-m3ua v0.0.0-20261015055950-600260766a36 h1:ppEk4qWuH9esUIjNzG31J13kHqN77epKhJ+Tl20t/MQ=
+github.com/gomaja/go-m3ua v0.0.0-20261015055950-600260766a36/go.mod h1:tQYL3MGa0hLtxfUrGwgUR84mqvhvRqWEuJeOFzJn+BY=
+github.com/gomaja/go-sctp v0.0.0-20261015040308-001e3ddea46c h1:eF6Bx9PmjgbbYAXcIUskMbCIeS8vKMFA5Rub6THi4ws=
+github.com/gomaja/go-sctp v0.0.0-20261015040308-001e3ddea46c/go.mod h1:vhJBNP0FsbqGN7MavOEB7sFzrxQ74mJdkaoz4e/ViFs=
 github.com/google/go-cmp v0.7.0 h1:wk8382ETsv4JYUZwIsn6YpYiWiBsYLSJiTsyBybVuN8=
 github.com/google/go-cmp v0.7.0/go.mod h1:pXiqmnSA92OHEEa9HXL2W4E7lf9JzCmGVUdgjX3N/iU=
-github.com/pascaldekloe/goe v0.1.1 h1:Ah6WQ56rZONR3RW3qWa2NCZ6JAVvSpUcoLBaOmYFt9Q=
-github.com/pascaldekloe/goe v0.1.1/go.mod h1:KSyfaxQOh0HZPjDP1FL/kFtbqYqrALJTaMafFUIccqU=
