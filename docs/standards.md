@@ -115,8 +115,19 @@ equal to the encoded message, with nil and empty slices equivalent.
 
 ## Procedures
 
+The MTP-SAP primitives carry the routing label and the network indicator of
+its SIO (ITU-T Q.711 (03/01) §7.2 Table 18; ITU-T Q.704 (07/96) §14.2.2),
+as does M3UA protocol data (RFC 4666 §3.3.1). Point codes are meaningful only
+in their network (ITU-T Q.711 (03/01) §6.1.1.2.2). The standard label has
+14-bit OPC and DPC and a 4-bit SLS, including in national applications
+(ITU-T Q.704 (07/96) §§2.2.1-2.2.4); the NI has two bits. The stack refuses
+wider values instead of truncating them. Responses go to the network of the
+message they answer. `StackConfig.NetworkIndicator` selects the network for
+N-UNITDATA and N-CONNECT requests, international by default. A node originating
+in several networks uses one Stack per network, with its point code there.
+
 The `Stack` type is an end node. It performs no I/O: messages arrive with their
-MTP routing label (Q.711 §7.2.1) and leave as MTP-TRANSFER requests. Its
+MTP routing information (Q.711 §7.2.1) and leave as MTP-TRANSFER requests. Its
 maximum message size is at least 11 octets, an IT (Q.713 Table 18), so that
 every message without user data the connection-oriented procedures must send
 fits.
@@ -178,9 +189,10 @@ fits.
   "Should not be present in case of a single XUDT message" (Q.713 Table 19
   Note 2).
 - Reassembly (§4.1.1.2) is keyed on the calling party address, the whole
-  routing label and the segmentation local reference (§4.1.1.2.2). The SLS is
-  part of the key: the segments of a message travel with "identical MTP routing
-  information (DPC, SLS)" (§4.1.1.1.2). Segments of any length are accepted
+  routing information, network included, and the segmentation local
+  reference (§4.1.1.2.2). The SLS is part of the key: the segments of a
+  message travel with "identical MTP routing information (DPC, SLS)"
+  (§4.1.1.1.2). Segments of any length are accepted
   while the total stays within the first segment's length times the number of
   segments (§4.1.1.2.1, §4.1.1.2.2). A failure ends the process and returns the
   first segment, its segmentation parameter unchanged (§4.1.1.2.3), when any
@@ -195,9 +207,10 @@ fits.
     octets, which LUDT segments can reach;
   - network congestion (§4.1.1.2.3.4): no room within the bounds on processes
     and buffered octets, in total and, when `MaxReassemblyOctetsPerPeer` is
-    set, for the signalling point (OPC) the segments come from. That bound is
-    off by default: in a network routed on global title, segments arrive from
-    the relay that translated them;
+    set, for the signalling point the segments come from, identified in its
+    network by the NI and the OPC. That bound is off by default: in a
+    network routed on global title, segments arrive from the relay that
+    translated them;
   - subsystem failure or unequipped user (§2.3.1 item 2 b)): a segment for a
     prohibited or unknown subsystem, whichever segment it is.
 
@@ -252,7 +265,7 @@ C.3 sheet 2).
 
 Received messages are checked as Annex B lays out:
 
-- An unassigned destination reference, an OPC other than the peer's and a
+- An unassigned destination reference, a (NI, OPC) other than the peer's and a
   source reference other than the peer's get the Table B.2 responses, built
   from the received message (Note 2). While the CR is pending (c3) no peer is
   associated yet (§3.1.4.2 items 1 and 3), so only the destination reference

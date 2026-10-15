@@ -37,8 +37,8 @@ type UnitdataRequest struct {
 	// Data is the user data, 1 to 3952 octets (§4.1.1.1.1).
 	Data []byte
 
-	// DPC is the point code of the SCCP node the message goes to. Zero
-	// selects the point code of CalledPartyAddress.
+	// DPC is the 14-bit point code of the SCCP node the message goes to.
+	// Zero selects the point code of CalledPartyAddress.
 	DPC uint32
 }
 
@@ -106,7 +106,11 @@ func (s *Stack) unitdata(now time.Time, req UnitdataRequest) ([]TransferRequest,
 		}
 		dpc = uint32(req.CalledPartyAddress.PointCode)
 	}
-	label := RoutingLabel{OPC: s.cfg.PointCode, DPC: dpc, SLS: s.sls(req.ProtocolClass, req.SequenceControl)}
+	// ITU-T Q.704 (07/96) §§2.2.1-2.2.2: the DPC has 14 bits.
+	if dpc > params.MaxPointCode {
+		return nil, fmt.Errorf("%w: destination point code %d exceeds %d", ErrInvalidRequest, dpc, params.MaxPointCode)
+	}
+	label := RoutingLabel{OPC: s.cfg.PointCode, DPC: dpc, SLS: s.sls(req.ProtocolClass, req.SequenceControl), NI: s.cfg.NetworkIndicator}
 	limits := MarshalOptions{MaxMessageSize: s.cfg.MaxMessageSize}
 
 	single := func() ([]TransferRequest, error) {
@@ -597,11 +601,22 @@ func (s *Stack) handleService(label RoutingLabel, m Message, local bool, res *Re
 	res.Indications = append(res.Indications, n)
 }
 
+// reassemblyPeer identifies a signalling point in its network,
+// ITU-T Q.711 (03/01) §6.1.1.2.2.
+type reassemblyPeer struct {
+	ni  NetworkIndicator
+	opc uint32
+}
+
+func (l RoutingLabel) peer() reassemblyPeer {
+	return reassemblyPeer{ni: l.NI, opc: l.OPC}
+}
+
 // reassemblyKey identifies a reassembly process by "the unique combination of
 // the Calling Party Address, MTP routing information, and the Segmentation
 // Local Reference" (ITU-T Q.714 (05/01) §4.1.1.2.2). The MTP routing
-// information is the whole routing label: §4.1.1.1.2 sends every segment with
-// "identical MTP routing information (DPC, SLS)".
+// information is the whole RoutingLabel, its network included: §4.1.1.1.2
+// sends every segment with "identical MTP routing information (DPC, SLS)".
 type reassemblyKey struct {
 	label     RoutingLabel
 	calling   string
@@ -704,7 +719,7 @@ func (s *Stack) reassemble(now time.Time, u *unitdata, ssn uint8, res *Result) {
 	}
 
 	if seg.FirstSegment {
-		if s.reassemblySlots >= s.cfg.MaxReassemblies || !s.roomFor(key.label.OPC, len(u.data)) {
+		if s.reassemblySlots >= s.cfg.MaxReassemblies || !s.roomFor(key.label.peer(), len(u.data)) {
 			// §4.1.1.2.3.4: no buffer space to perform reassembly.
 			s.rejectSegment(now, key, u, params.ReturnCauseNetworkCongestion,
 				fmt.Errorf("%w: no buffer space for reference %#06x", ErrReassembly, key.reference), res)
@@ -729,7 +744,7 @@ func (s *Stack) reassemble(now time.Time, u *unitdata, ssn uint8, res *Result) {
 		p.first.data = nil
 		s.reassemblies[key] = p
 		s.reassemblySlots++
-		s.hold(key.label.OPC, len(u.data))
+		s.hold(key.label.peer(), len(u.data))
 		p.timer = s.schedule(now.Add(s.cfg.ReassemblyTimeout), func(now time.Time, res *Result) {
 			// §4.1.1.2.1 and §4.1.1.2.3.2: T(reassembly) expiry discards the
 			// message and is an error in message transport.
@@ -770,7 +785,7 @@ func (s *Stack) reassemble(now time.Time, u *unitdata, ssn uint8, res *Result) {
 			fmt.Errorf("%w: %d octets exceed %d", ErrReassembly, total, MaxLongData), res)
 		res.discard(u.label, u.typ, fmt.Errorf("%w: message too long", ErrReassembly))
 		return
-	case !s.roomFor(key.label.OPC, len(u.data)):
+	case !s.roomFor(key.label.peer(), len(u.data)):
 		// §4.1.1.2.3.4: no buffer space to perform reassembly.
 		s.failReassembly(now, p, params.ReturnCauseNetworkCongestion,
 			fmt.Errorf("%w: no buffer space for reference %#06x", ErrReassembly, key.reference), res)
@@ -782,7 +797,7 @@ func (s *Stack) reassemble(now time.Time, u *unitdata, ssn uint8, res *Result) {
 	data := make([]byte, total)
 	copy(data[copy(data, p.data):], u.data)
 	p.data = data
-	s.hold(key.label.OPC, len(u.data))
+	s.hold(key.label.peer(), len(u.data))
 	if seg.RemainingSegments > 0 {
 		p.expected--
 		return
@@ -838,7 +853,7 @@ func (s *Stack) rejectSegment(now time.Time, key reassemblyKey, u *unitdata, cau
 func (s *Stack) failReassembly(now time.Time, p *reassembly, cause params.ReturnCause, reason error, res *Result) {
 	first := p.firstSegment()
 	s.reject(first, p.returnOnError, cause, reason, res)
-	s.hold(p.key.label.OPC, -len(p.data))
+	s.hold(p.key.label.peer(), -len(p.data))
 	*p = reassembly{key: p.key, failed: true, firstKnown: true, firstHash: s.segmentHash(first), timer: p.timer}
 	s.stop(p.timer)
 	p.timer = s.schedule(now.Add(s.cfg.ReassemblyTimeout), func(time.Time, *Result) { s.endReassembly(p) })
@@ -853,26 +868,26 @@ func (s *Stack) endReassembly(p *reassembly) {
 		s.orphanRecords--
 	} else {
 		s.reassemblySlots--
-		s.hold(p.key.label.OPC, -len(p.data))
+		s.hold(p.key.label.peer(), -len(p.data))
 	}
 	s.stop(p.timer)
 }
 
 // roomFor reports whether the processes can hold n more octets of user data
-// from the signalling point opc: within MaxReassemblyOctets and
+// from the signalling point peer: within MaxReassemblyOctets and
 // MaxReassemblyOctetsPerPeer (ITU-T Q.714 (05/01) §4.1.1.2.3.4).
-func (s *Stack) roomFor(opc uint32, n int) bool {
+func (s *Stack) roomFor(peer reassemblyPeer, n int) bool {
 	perPeer := s.cfg.MaxReassemblyOctetsPerPeer
-	return s.reassemblyOctets+n <= s.cfg.MaxReassemblyOctets && (perPeer == 0 || s.peerOctets[opc]+n <= perPeer)
+	return s.reassemblyOctets+n <= s.cfg.MaxReassemblyOctets && (perPeer == 0 || s.peerOctets[peer]+n <= perPeer)
 }
 
 // hold accounts for n more octets of user data held for the signalling point
-// opc, or fewer when n is negative.
-func (s *Stack) hold(opc uint32, n int) {
+// peer, or fewer when n is negative.
+func (s *Stack) hold(peer reassemblyPeer, n int) {
 	s.reassemblyOctets += n
-	if v := s.peerOctets[opc] + n; v != 0 {
-		s.peerOctets[opc] = v
+	if v := s.peerOctets[peer] + n; v != 0 {
+		s.peerOctets[peer] = v
 	} else {
-		delete(s.peerOctets, opc)
+		delete(s.peerOctets, peer)
 	}
 }

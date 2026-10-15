@@ -48,6 +48,8 @@ func FuzzUnitdataTransfer(f *testing.F) {
 	f.Add(script(step(0, segment(4, true, 3, 240, true)), step(3, nil), step(0, segment(4, false, 2, 240, true)), step(3, nil), step(0, segment(4, true, 1, 50, false))))
 	f.Add(script(step(0, segment(5, true, 15, 240, true)), step(0, segment(6, true, 15, 240, true)), step(0, segment(7, true, 15, 240, true)), step(0, segment(8, true, 1, 10, true))))
 
+	f.Add(script(step(0, segment(9, true, 1, 200, true)), step(128, segment(9, true, 1, 200, true)), step(0, segment(9, false, 0, 100, false)), step(128, segment(9, false, 0, 100, false))))
+
 	f.Fuzz(func(t *testing.T, script []byte) {
 		now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 		s, err := NewStack(StackConfig{PointCode: 2, MaxReassemblies: 3, MaxReassemblyOctets: 600, MaxReassemblyOctetsPerPeer: 400,
@@ -83,7 +85,7 @@ func FuzzUnitdataTransfer(f *testing.F) {
 				}
 			}
 			slots, orphans, octets := 0, 0, 0
-			peers := make(map[uint32]int)
+			peers := make(map[reassemblyPeer]int)
 			for key, p := range s.reassemblies {
 				switch {
 				case p.key != key:
@@ -100,7 +102,7 @@ func FuzzUnitdataTransfer(f *testing.F) {
 					// A process, or the record that took its place.
 					slots++
 					octets += len(p.data)
-					peers[key.label.OPC] += len(p.data)
+					peers[reassemblyPeer{ni: key.label.NI, opc: key.label.OPC}] += len(p.data)
 					if !p.failed && (len(p.data) > p.bound || len(p.data) > MaxLongData || p.firstLen > len(p.data)) {
 						t.Fatalf("process holds %d octets, first %d, bound %d", len(p.data), p.firstLen, p.bound)
 					}
@@ -111,11 +113,11 @@ func FuzzUnitdataTransfer(f *testing.F) {
 				t.Fatalf("%d slots hold %d octets (accounted %d slots, %d octets), %d records of messages with no process (accounted %d)",
 					slots, octets, s.reassemblySlots, s.reassemblyOctets, orphans, s.orphanRecords)
 			}
-			for opc, held := range peers {
+			for peer, held := range peers {
 				if held == 0 {
-					delete(peers, opc)
+					delete(peers, peer)
 				} else if held > s.cfg.MaxReassemblyOctetsPerPeer {
-					t.Fatalf("peer %d holds %d octets, more than %d", opc, held, s.cfg.MaxReassemblyOctetsPerPeer)
+					t.Fatalf("peer %v holds %d octets, more than %d", peer, held, s.cfg.MaxReassemblyOctetsPerPeer)
 				}
 			}
 			if !maps.Equal(peers, s.peerOctets) {
@@ -134,8 +136,8 @@ func FuzzUnitdataTransfer(f *testing.F) {
 				msg := script[2 : 2+n]
 				script = script[2+n:]
 				// Bit 4 moves the message to another link, another SLS; bit 5
-				// to another peer, another OPC.
-				check(s.HandleTransfer(TransferIndication{RoutingLabel: RoutingLabel{OPC: 1 + uint32(op>>5&1), DPC: 2, SLS: op >> 4 & 1}, Data: msg}))
+				// to another peer, another OPC; bits 6-7 select the network.
+				check(s.HandleTransfer(TransferIndication{RoutingLabel: RoutingLabel{OPC: 1 + uint32(op>>5&1), DPC: 2, SLS: op >> 4 & 1, NI: NetworkIndicator(op >> 6)}, Data: msg}))
 			case 2:
 				now = now.Add(time.Duration(op>>2) * time.Second)
 				check(s.HandleTimeout())
