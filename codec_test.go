@@ -6,6 +6,7 @@ package sccp_test
 
 import (
 	"bytes"
+	"encoding"
 	"encoding/hex"
 	"errors"
 	"io"
@@ -18,8 +19,6 @@ import (
 	"github.com/gomaja/go-sccp"
 	"github.com/gomaja/go-sccp/params"
 )
-
-func ptr[T any](v T) *T { return &v }
 
 func unhex(t testing.TB, s string) []byte {
 	t.Helper()
@@ -49,8 +48,8 @@ var vectors = []struct {
 		"01 010203 02 02 00 024206"},
 	{"CR with optional parameters", &sccp.CR{
 		SourceLocalReference: 0x030201, ProtocolClass: params.ProtocolClass{Class: 3}, CalledPartyAddress: ssn6,
-		Credit: ptr(params.Credit(5)), CallingPartyAddress: &ssn7, Data: []byte{0xaa, 0xbb},
-		HopCounter: ptr(params.HopCounter(4)), Importance: ptr(params.Importance(2)),
+		Credit: new(params.Credit(5)), CallingPartyAddress: &ssn7, Data: []byte{0xaa, 0xbb},
+		HopCounter: new(params.HopCounter(4)), Importance: new(params.Importance(2)),
 	}, "01 010203 03 02 04 024206 090105 04024207 0f02aabb 110104 120102 00"},
 	{"CC", &sccp.CC{DestinationLocalReference: 0x030201, SourceLocalReference: 0x060504, ProtocolClass: params.ProtocolClass{Class: 2}},
 		"02 010203 040506 02 00"},
@@ -60,7 +59,7 @@ var vectors = []struct {
 	}, "02 010203 040506 02 01 03024206 0f01cc 00"},
 	{"CREF", &sccp.CREF{DestinationLocalReference: 0x030201, RefusalCause: params.RefusalCauseSubsystemCongestion},
 		"03 010203 0b 00"},
-	{"CREF with importance", &sccp.CREF{DestinationLocalReference: 0x030201, RefusalCause: params.RefusalCauseSubsystemCongestion, Importance: ptr(params.Importance(3))},
+	{"CREF with importance", &sccp.CREF{DestinationLocalReference: 0x030201, RefusalCause: params.RefusalCauseSubsystemCongestion, Importance: new(params.Importance(3))},
 		"03 010203 0b 01 120103 00"},
 	{"RLSD", &sccp.RLSD{DestinationLocalReference: 0x030201, SourceLocalReference: 0x060504, ReleaseCause: params.ReleaseCauseSCCPUserOriginated},
 		"04 010203 040506 03 00"},
@@ -94,7 +93,7 @@ var vectors = []struct {
 	{"XUDT segment", &sccp.XUDT{ProtocolClass: params.ProtocolClass{Class: 1}, HopCounter: 15, CalledPartyAddress: ssn8, CallingPartyAddress: ssn7, Data: []byte{0xaa, 0xbb}, Segmentation: &seg},
 		"11 01 0f 04 06 08 0a 024208 024207 02aabb 1004c1010203 00"},
 	{"XUDTS", &sccp.XUDTS{ReturnCause: params.ReturnCauseErrorInMessageTransport, HopCounter: 15, CalledPartyAddress: ssn7, CallingPartyAddress: ssn8, Data: []byte{0xaa, 0xbb},
-		Segmentation: &seg, Importance: ptr(params.Importance(4))},
+		Segmentation: &seg, Importance: new(params.Importance(4))},
 		"12 08 0f 04 06 08 0a 024207 024208 02aabb 1004c1010203 120104 00"},
 	{"LUDT", &sccp.LUDT{ProtocolClass: params.ProtocolClass{Class: 1}, HopCounter: 15, CalledPartyAddress: ssn8, CallingPartyAddress: ssn7, Data: []byte{0xaa, 0xbb, 0xcc}},
 		"13 01 0f 0700 0800 0900 0000 024208 024207 0300aabbcc"},
@@ -322,8 +321,8 @@ func TestDecodeRejectsMalformed(t *testing.T) {
 	if _, err := sccp.ParseMessage(nil); !errors.Is(err, io.ErrUnexpectedEOF) {
 		t.Errorf("ParseMessage(nil) = %v", err)
 	}
-	var unsupported sccp.UnsupportedTypeError
-	if _, err := sccp.ParseMessage([]byte{0x15}); !errors.As(err, &unsupported) || unsupported != 0x15 || err.Error() == "" {
+	_, err := sccp.ParseMessage([]byte{0x15})
+	if unsupported, ok := errors.AsType[sccp.UnsupportedTypeError](err); !ok || unsupported != 0x15 || err.Error() == "" {
 		t.Errorf("ParseMessage(0x15) = %v, want UnsupportedTypeError", err)
 	}
 	var udt sccp.UDT
@@ -414,7 +413,7 @@ func TestEncodeRefusesInvalidMessages(t *testing.T) {
 		{"UDT connection-oriented class", &sccp.UDT{ProtocolClass: params.ProtocolClass{Class: 2}, CalledPartyAddress: ssn6, CallingPartyAddress: ssn7, Data: []byte{1}}},
 		{"XUDT hop counter zero", &sccp.XUDT{CalledPartyAddress: ssn6, CallingPartyAddress: ssn7, Data: []byte{1}}},
 		{"XUDT invalid segmentation", &sccp.XUDT{HopCounter: 15, CalledPartyAddress: ssn6, CallingPartyAddress: ssn7, Data: []byte{1}, Segmentation: &params.Segmentation{RemainingSegments: 16}}},
-		{"XUDT importance 8", &sccp.XUDT{HopCounter: 15, CalledPartyAddress: ssn6, CallingPartyAddress: ssn7, Data: []byte{1}, Importance: ptr(params.Importance(8))}},
+		{"XUDT importance 8", &sccp.XUDT{HopCounter: 15, CalledPartyAddress: ssn6, CallingPartyAddress: ssn7, Data: []byte{1}, Importance: new(params.Importance(8))}},
 		{"XUDT raw parameter with a recognised code", &sccp.XUDT{HopCounter: 15, CalledPartyAddress: ssn6, CallingPartyAddress: ssn7, Data: []byte{1},
 			Unrecognized: []params.RawParameter{{Code: params.PCodeImportance, Value: []byte{1}}}}},
 		{"XUDT raw end of optional parameters", &sccp.XUDT{HopCounter: 15, CalledPartyAddress: ssn6, CallingPartyAddress: ssn7, Data: []byte{1},
@@ -460,7 +459,7 @@ func TestEncodeRefusesInvalidMessages(t *testing.T) {
 		{"XUDT later segment in class 0", &sccp.XUDT{HopCounter: 15, CalledPartyAddress: ssn6, CallingPartyAddress: ssn7, Data: []byte{1}, Segmentation: &params.Segmentation{}}},
 		{"LUDT segment in class 0", &sccp.LUDT{HopCounter: 15, CalledPartyAddress: ssn6, CallingPartyAddress: ssn7, Data: []byte{1}, Segmentation: &params.Segmentation{RemainingSegments: 3}}},
 		// Q.714 §3.5.2.3: the window "shall not exceed 127".
-		{"CR credit 128", &sccp.CR{ProtocolClass: params.ProtocolClass{Class: 3}, CalledPartyAddress: ssn6, Credit: ptr(params.Credit(128))}},
+		{"CR credit 128", &sccp.CR{ProtocolClass: params.ProtocolClass{Class: 3}, CalledPartyAddress: ssn6, Credit: new(params.Credit(128))}},
 		{"AK credit 128", &sccp.AK{Credit: 128}},
 		// Q.713 §1.9 and §3.11-§3.15: code 11111111 is reserved.
 		{"raw parameter name 0xff", &sccp.ERR{Unrecognized: []params.RawParameter{{Code: 0xff, Value: []byte{1}}}}},
@@ -499,7 +498,7 @@ func TestEncodeAcceptsEdgeValues(t *testing.T) {
 		// segment, so class 0 is allowed.
 		&sccp.XUDT{HopCounter: 15, CalledPartyAddress: ssn6, CallingPartyAddress: ssn7, Data: []byte{1}, Segmentation: &params.Segmentation{FirstSegment: true}},
 		&sccp.CR{ProtocolClass: params.ProtocolClass{Class: 2}, CalledPartyAddress: ssn6, Data: make([]byte, 128)},
-		&sccp.CC{ProtocolClass: params.ProtocolClass{Class: 3}, Credit: ptr(params.MaxCredit), Data: make([]byte, 128)},
+		&sccp.CC{ProtocolClass: params.ProtocolClass{Class: 3}, Credit: new(params.MaxCredit), Data: make([]byte, 128)},
 		&sccp.ED{Data: make([]byte, 32)},
 		&sccp.UDTS{ReturnCause: 0xfe, CalledPartyAddress: ssn6, CallingPartyAddress: ssn7, Data: []byte{1}},
 		&sccp.ERR{Unrecognized: []params.RawParameter{{Code: 0xfe}}},
@@ -718,3 +717,22 @@ func TestZeroValueStrings(t *testing.T) {
 		t.Error("unknown type has an empty String")
 	}
 }
+
+// The message and parameter types implement the standard binary encoding
+// interfaces: the encoder appends parameters as encoding.BinaryAppender.
+var (
+	_ interface {
+		encoding.BinaryAppender
+		encoding.BinaryMarshaler
+		encoding.BinaryUnmarshaler
+	} = sccp.Message(nil)
+	_ encoding.BinaryAppender = sccp.SCMG{}
+	_ encoding.BinaryAppender = params.PartyAddress{}
+	_ encoding.BinaryAppender = params.ProtocolClass{}
+	_ encoding.BinaryAppender = params.LocalReference(0)
+	_ encoding.BinaryAppender = params.Credit(0)
+	_ encoding.BinaryAppender = params.HopCounter(0)
+	_ encoding.BinaryAppender = params.Importance(0)
+	_ encoding.BinaryAppender = params.SequencingSegmenting{}
+	_ encoding.BinaryAppender = params.Segmentation{}
+)

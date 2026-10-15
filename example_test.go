@@ -107,7 +107,7 @@ func ExampleStack_Connect() {
 
 	ref, res, err := a.Connect(sccp.ConnectRequest{
 		CalledPartyAddress:  params.NewPointCodeAddress(0x0202, 254),
-		CallingPartyAddress: ptr(params.NewPointCodeAddress(0x0101, 254)),
+		CallingPartyAddress: new(params.NewPointCodeAddress(0x0101, 254)),
 	})
 	if err != nil {
 		log.Fatal(err)

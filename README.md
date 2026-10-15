@@ -22,6 +22,8 @@ go get github.com/gomaja/go-sccp@main
 Track the `main` branch. Every version tagged so far is retracted, so ask for
 `@main` explicitly. The public API follows `main` and may change.
 
+It requires Go 1.26 or later.
+
 ## What it does
 
 - **Codecs for every SCCP message** of ITU-T Q.713 (03/01) Table 1 and every

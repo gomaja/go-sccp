@@ -10,6 +10,7 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/google/go-cmp/cmp"
@@ -162,7 +163,7 @@ func TestUnitdataSingleMessage(t *testing.T) {
 
 	// An importance, or UseXUDT, selects an XUDT with the configured hop counter.
 	req = request([]byte("x"))
-	req.Importance = ptr(params.Importance(3))
+	req.Importance = new(params.Importance(3))
 	if x, ok := mustUnitdata(t, s, req)[0].Message.(*sccp.XUDT); !ok || x.HopCounter != 15 || x.Importance == nil || *x.Importance != 3 || x.Segmentation != nil {
 		t.Fatalf("request with importance sent %v", x)
 	}
@@ -235,7 +236,7 @@ func TestUnitdataRejectsInvalidRequests(t *testing.T) {
 		{"3953 octets", func(r *sccp.UnitdataRequest) { r.Data = payload(3953) }, sccp.ErrSegmentation},
 		{"invalid called address", func(r *sccp.UnitdataRequest) { r.CalledPartyAddress.PointCode = 1 }, sccp.ErrInvalidRequest},
 		{"invalid calling address", func(r *sccp.UnitdataRequest) { r.CallingPartyAddress.SSN, r.CallingPartyAddress.HasSSN = 1, false }, sccp.ErrInvalidRequest},
-		{"invalid importance", func(r *sccp.UnitdataRequest) { r.Importance = ptr(params.Importance(9)) }, sccp.ErrInvalidRequest},
+		{"invalid importance", func(r *sccp.UnitdataRequest) { r.Importance = new(params.Importance(9)) }, sccp.ErrInvalidRequest},
 		{"no destination", func(r *sccp.UnitdataRequest) { r.DPC = 0 }, sccp.ErrInvalidRequest},
 	}
 	for _, tt := range tests {
@@ -814,6 +815,9 @@ func TestGlobalTitleCallbackMayUseTheStack(t *testing.T) {
 	}}, 8)
 	gt, _ := params.NewGlobalTitle4(0, params.NPISDNTelephony, params.NAIInternationalNumber, "4479")
 	in := encodeUnitdata(t, &sccp.UDT{CalledPartyAddress: params.NewGlobalTitleAddress(gt, 8), CallingPartyAddress: params.NewSSNAddress(7), Data: []byte{1}})
+	// The watchdog stays in real time: synctest does not take a goroutine
+	// blocked on a sync.Mutex as durably blocked, so a deadlock would hang the
+	// bubble instead of failing the test.
 	done := make(chan sccp.Result, 1)
 	go func() { done <- b.HandleTransfer(in) }()
 	select {
@@ -1005,7 +1009,7 @@ func TestServiceMessages(t *testing.T) {
 	b := newStack(t, newClock(), pcB, sccp.StackConfig{}, 8)
 	seg := &params.Segmentation{FirstSegment: true, RemainingSegments: 2, LocalReference: 4}
 	x := &sccp.XUDTS{ReturnCause: params.ReturnCauseSubsystemCongestion, HopCounter: 15, CalledPartyAddress: params.NewSSNAddress(8), CallingPartyAddress: params.NewSSNAddress(7),
-		Data: []byte{1, 2}, Segmentation: seg, Importance: ptr(params.Importance(2))}
+		Data: []byte{1, 2}, Segmentation: seg, Importance: new(params.Importance(2))}
 	res := b.HandleTransfer(encodeUnitdata(t, x))
 	if len(res.Indications) != 1 || len(res.Transfers) != 0 {
 		t.Fatalf("XUDTS: %+v", res)
@@ -1207,7 +1211,7 @@ func TestUnitdataImportance(t *testing.T) {
 		}
 	}
 	req := request(payload(10))
-	req.Importance = ptr(params.Importance(8))
+	req.Importance = new(params.Importance(8))
 	if _, err := a.Unitdata(req); !errors.Is(err, sccp.ErrInvalidRequest) {
 		t.Fatalf("importance 8: %v", err)
 	}
@@ -1494,9 +1498,10 @@ func TestNewStackRejectsInvalidConfig(t *testing.T) {
 	}
 }
 
-// TestRunTimers checks the real-time timer driver.
 // TestRunTimers checks that RunTimers delivers whatever the timers produce,
-// and wakes up for a timer earlier than the one it is waiting for.
+// and wakes up for a timer earlier than the one it is waiting for. It runs in a
+// synctest bubble, where the stack's default clock and RunTimers' timer use the
+// bubble's fake clock: a timer fires at its exact deadline, with no real wait.
 func TestRunTimers(t *testing.T) {
 	run := func(s *sccp.Stack) (<-chan sccp.Result, func()) {
 		ctx, cancel := context.WithCancel(context.Background())
@@ -1520,42 +1525,52 @@ func TestRunTimers(t *testing.T) {
 	}
 
 	t.Run("return", func(t *testing.T) {
-		a := newStack(t, nil, pcA, sccp.StackConfig{})
-		b := newStack(t, nil, pcB, sccp.StackConfig{ReassemblyTimeout: 20 * time.Millisecond}, 8)
-		got, stop := run(b)
-		defer stop()
-		deliver(b, mustUnitdata(t, a, request(payload(300)))[0])
-		if r := wait(t, got, "T(reassembly)"); len(r.Transfers) != 1 {
-			t.Fatalf("timer result %+v", r)
-		}
+		synctest.Test(t, func(t *testing.T) {
+			a := newStack(t, nil, pcA, sccp.StackConfig{})
+			b := newStack(t, nil, pcB, sccp.StackConfig{ReassemblyTimeout: 20 * time.Millisecond}, 8)
+			got, stop := run(b)
+			defer stop()
+			start := time.Now()
+			deliver(b, mustUnitdata(t, a, request(payload(300)))[0])
+			if r := wait(t, got, "T(reassembly)"); len(r.Transfers) != 1 {
+				t.Fatalf("timer result %+v", r)
+			}
+			if d := time.Since(start); d != 20*time.Millisecond {
+				t.Fatalf("T(reassembly) fired after %v, want 20ms", d)
+			}
+		})
 	})
 	t.Run("discard only, earlier than the awaited timer", func(t *testing.T) {
-		a := newStack(t, nil, pcA, sccp.StackConfig{})
-		b := newStack(t, nil, pcB, sccp.StackConfig{ReassemblyTimeout: 20 * time.Millisecond, Connection: sccp.ConnectionConfig{EstablishmentTimeout: time.Hour}}, 8)
-		if _, _, err := b.Connect(sccp.ConnectRequest{CalledPartyAddress: params.NewPointCodeAddress(pcA, 8)}); err != nil {
-			t.Fatal(err)
-		}
-		got, stop := run(b)
-		defer stop()
-		// Let RunTimers settle on T(conn est), an hour away.
-		time.Sleep(50 * time.Millisecond)
-		req := request(payload(300))
-		req.ReturnOnError = false
-		deliver(b, mustUnitdata(t, a, req)[0])
-		if r := wait(t, got, "T(reassembly)"); len(r.Transfers)+len(r.Indications) != 0 || len(r.Discards) != 1 {
-			t.Fatalf("timer result %+v", r)
-		}
+		synctest.Test(t, func(t *testing.T) {
+			a := newStack(t, nil, pcA, sccp.StackConfig{})
+			b := newStack(t, nil, pcB, sccp.StackConfig{ReassemblyTimeout: 20 * time.Millisecond, Connection: sccp.ConnectionConfig{EstablishmentTimeout: time.Hour}}, 8)
+			if _, _, err := b.Connect(sccp.ConnectRequest{CalledPartyAddress: params.NewPointCodeAddress(pcA, 8)}); err != nil {
+				t.Fatal(err)
+			}
+			got, stop := run(b)
+			defer stop()
+			// RunTimers settles on T(conn est), an hour away.
+			synctest.Wait()
+			req := request(payload(300))
+			req.ReturnOnError = false
+			deliver(b, mustUnitdata(t, a, req)[0])
+			if r := wait(t, got, "T(reassembly)"); len(r.Transfers)+len(r.Indications) != 0 || len(r.Discards) != 1 {
+				t.Fatalf("timer result %+v", r)
+			}
+		})
 	})
 	t.Run("indication only", func(t *testing.T) {
-		b := newStack(t, nil, pcB, sccp.StackConfig{Connection: sccp.ConnectionConfig{EstablishmentTimeout: 20 * time.Millisecond}})
-		if _, _, err := b.Connect(sccp.ConnectRequest{CalledPartyAddress: params.NewPointCodeAddress(pcA, 8)}); err != nil {
-			t.Fatal(err)
-		}
-		got, stop := run(b)
-		defer stop()
-		if r := wait(t, got, "T(conn est)"); len(r.Transfers)+len(r.Discards) != 0 || len(r.Indications) != 1 {
-			t.Fatalf("timer result %+v", r)
-		}
+		synctest.Test(t, func(t *testing.T) {
+			b := newStack(t, nil, pcB, sccp.StackConfig{Connection: sccp.ConnectionConfig{EstablishmentTimeout: 20 * time.Millisecond}})
+			if _, _, err := b.Connect(sccp.ConnectRequest{CalledPartyAddress: params.NewPointCodeAddress(pcA, 8)}); err != nil {
+				t.Fatal(err)
+			}
+			got, stop := run(b)
+			defer stop()
+			if r := wait(t, got, "T(conn est)"); len(r.Transfers)+len(r.Discards) != 0 || len(r.Indications) != 1 {
+				t.Fatalf("timer result %+v", r)
+			}
+		})
 	})
 }
 
@@ -1569,9 +1584,7 @@ func TestConcurrentUse(t *testing.T) {
 	var mu sync.Mutex
 	delivered := 0
 	for g := range 8 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for i := range 20 {
 				req := request(payload(100 + 37*g + i))
 				req.CallingPartyAddress = params.NewSSNAddress(uint8(10 + g))
@@ -1587,7 +1600,7 @@ func TestConcurrentUse(t *testing.T) {
 				delivered += len(r.Indications)
 				mu.Unlock()
 			}
-		}()
+		})
 	}
 	wg.Wait()
 	if delivered != 160 {
