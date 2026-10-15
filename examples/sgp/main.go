@@ -8,8 +8,10 @@ Command sccp-sgp receives SCCP connectionless user data at an M3UA SGP.
 Every M3UA DATA message from an ASP goes to a go-sccp Stack, which reassembles
 segmented XUDTs and prints each N-UNITDATA indication. Messages the stack
 returns — a UDTS or XUDTS for data it cannot deliver, or for a reassembly that
-fails — are sent back to the ASP on the same association. Connection requests
-are refused: the stack waits for its user to answer them.
+fails — go back through go-m3ua's SGP distribution function, which picks the
+ASPs of the Application Server by its traffic mode (RFC 4666 §4.3.4.3), in the
+network the stack answers in. Connection requests are refused: the stack waits
+for its user to answer them.
 */
 package main
 
@@ -21,10 +23,10 @@ import (
 	"log"
 	"os"
 	"os/signal"
-	"sync"
 	"syscall"
 
 	"github.com/gomaja/go-m3ua"
+	"github.com/gomaja/go-m3ua/messages"
 	m3params "github.com/gomaja/go-m3ua/messages/params"
 	"github.com/gomaja/go-sctp"
 
@@ -48,10 +50,8 @@ func main() {
 	}
 	stack.RegisterSubsystem(uint8(*ssn))
 
-	config := m3ua.NewAssociationConfig().SetApplicationServers(m3ua.ASConfig{
-		ASKey:       m3ua.ASKey{NetworkAppearance: 0, NetworkAppearanceSet: true, RoutingContext: uint32(*rc), RoutingContextSet: true},
-		TrafficMode: m3params.TrafficModeLoadshare,
-	})
+	as := m3ua.ASKey{NetworkAppearance: 0, NetworkAppearanceSet: true, RoutingContext: uint32(*rc), RoutingContextSet: true}
+	config := m3ua.NewAssociationConfig().SetApplicationServers(m3ua.ASConfig{ASKey: as, TrafficMode: m3params.TrafficModeLoadshare})
 
 	laddr, err := sctp.ResolveAddr("sctp", *addr)
 	if err != nil {
@@ -72,17 +72,15 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	// Reassembly timer expiries return XUDTS messages; they go out on the
-	// association the first segment came from.
-	routes := newReplyRoutes()
-	go stack.RunTimers(ctx, func(res sccp.Result) { deliver(ctx, stack, res, routes) })
+	// Reassembly timer expiries return XUDTS messages, distributed like the
+	// other messages the stack sends.
+	go stack.RunTimers(ctx, func(res sccp.Result) { deliver(stack, listener, as, res) })
 
 	go func() {
 		for {
 			association, err := listener.Accept(ctx)
 			if err != nil {
-				var rejected *m3ua.AssociationEstablishmentError
-				if errors.As(err, &rejected) {
+				if rejected, ok := errors.AsType[*m3ua.AssociationEstablishmentError](err); ok {
 					log.Printf("Rejected an M3UA association: %s", rejected)
 					continue
 				}
@@ -91,7 +89,7 @@ func main() {
 				return
 			}
 			log.Printf("Associated with %s", association.RemoteAddr())
-			go serve(ctx, stack, association, routes)
+			go serve(ctx, stack, listener, as, association)
 		}
 	}()
 	<-ctx.Done()
@@ -100,7 +98,7 @@ func main() {
 	}
 }
 
-func serve(ctx context.Context, stack *sccp.Stack, association *m3ua.Association, routes *replyRoutes) {
+func serve(ctx context.Context, stack *sccp.Stack, listener *m3ua.Listener, as m3ua.ASKey, association *m3ua.Association) {
 	defer func() { _ = association.Close() }()
 	for {
 		message, err := association.ReadData(ctx)
@@ -111,17 +109,18 @@ func serve(ctx context.Context, stack *sccp.Stack, association *m3ua.Association
 			return
 		}
 		pd := message.ProtocolData
-		routes.learn(pd.OriginatingPointCode, reply{association: association, as: message.AS, ni: pd.NetworkIndicator})
-		deliver(ctx, stack, stack.HandleTransfer(sccp.TransferIndication{
-			RoutingLabel: sccp.RoutingLabel{OPC: pd.OriginatingPointCode, DPC: pd.DestinationPointCode, SLS: pd.SignallingLinkSelection},
+		deliver(stack, listener, as, stack.HandleTransfer(sccp.TransferIndication{
+			RoutingLabel: sccp.RoutingLabel{OPC: pd.OriginatingPointCode, DPC: pd.DestinationPointCode, SLS: pd.SignallingLinkSelection, NI: sccp.NetworkIndicator(pd.NetworkIndicator)},
 			Data:         pd.Data,
-		}), routes)
+		}))
 	}
 }
 
-// deliver prints what the stack produced and sends its messages back to the
-// peers they are addressed to. Cancelling ctx abandons the sends.
-func deliver(ctx context.Context, stack *sccp.Stack, res sccp.Result, routes *replyRoutes) {
+// deliver prints what the stack produced and hands its messages to the SGP
+// distribution function of go-m3ua (RFC 4666 §1.4.2.4) for the Application
+// Server. The example serves one AS; a gateway with several picks the AS from
+// its routing keys.
+func deliver(stack *sccp.Stack, listener *m3ua.Listener, as m3ua.ASKey, res sccp.Result) {
 	for _, ind := range res.Indications {
 		switch ind := ind.(type) {
 		case *sccp.UnitdataIndication:
@@ -136,7 +135,7 @@ func deliver(ctx context.Context, stack *sccp.Stack, res sccp.Result, routes *re
 				continue
 			}
 			log.Printf("Refused a connection request from %d", ind.OPC)
-			deliver(ctx, stack, refusal, routes)
+			deliver(stack, listener, as, refusal)
 		case *sccp.MaintenanceIndication:
 			log.Printf("Maintenance: %s from %d: %s", ind.MessageType, ind.OPC, ind.Reason)
 		}
@@ -145,48 +144,16 @@ func deliver(ctx context.Context, stack *sccp.Stack, res sccp.Result, routes *re
 		log.Printf("Discarded %s from %d: %s", d.MessageType, d.OPC, d.Reason)
 	}
 	for _, tr := range res.Transfers {
-		r, ok := routes.lookup(tr.DPC)
-		if !ok {
-			log.Printf("No association towards %d for %s", tr.DPC, tr.Message.MessageType())
-			continue
-		}
-		_, err := r.association.WriteDataContext(ctx, m3ua.DataRequest{
-			AS:           r.as,
-			ProtocolData: *m3params.NewProtocolDataPayload(tr.OPC, tr.DPC, m3params.ServiceIndSCCP, r.ni, 0, tr.SLS, tr.Data),
-		})
-		if err != nil {
+		data := messages.NewData(m3params.NewNetworkAppearance(as.NetworkAppearance), m3params.NewRoutingContext(as.RoutingContext),
+			m3params.NewProtocolData(tr.OPC, tr.DPC, m3params.ServiceIndSCCP, uint8(tr.NI), 0, tr.SLS, tr.Data), nil)
+		distribution, err := listener.DistributeData(data)
+		switch {
+		case err != nil:
 			log.Printf("Sending %s: %s", tr.Message.MessageType(), err)
-			continue
+		case distribution.Queued:
+			log.Printf("Queued %s for %d while the AS is pending", tr.Message.MessageType(), tr.DPC)
+		default:
+			log.Printf("Sent %s back to %d", tr.Message.MessageType(), tr.DPC)
 		}
-		log.Printf("Sent %s back to %d", tr.Message.MessageType(), tr.DPC)
 	}
-}
-
-// reply is where messages for a peer point code go: the association and the
-// Application Server its last DATA arrived on, and its network indicator.
-type reply struct {
-	association *m3ua.Association
-	as          m3ua.ASKey
-	ni          uint8
-}
-
-// replyRoutes maps a peer point code to the reply route it was last heard on.
-type replyRoutes struct {
-	mu     sync.Mutex
-	routes map[uint32]reply
-}
-
-func newReplyRoutes() *replyRoutes { return &replyRoutes{routes: make(map[uint32]reply)} }
-
-func (r *replyRoutes) learn(pc uint32, route reply) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.routes[pc] = route
-}
-
-func (r *replyRoutes) lookup(pc uint32) (reply, bool) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	route, ok := r.routes[pc]
-	return route, ok
 }
