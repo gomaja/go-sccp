@@ -7,6 +7,7 @@ package sccp
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/gomaja/go-sccp/params"
@@ -335,10 +336,8 @@ func (s *Stack) requestConnection(ref params.LocalReference, states ...Connectio
 	if c == nil || c.State == ConnectionFrozen {
 		return nil, fmt.Errorf("%w: %#x", ErrConnectionNotFound, ref)
 	}
-	for _, state := range states {
-		if c.State == state {
-			return c, nil
-		}
+	if slices.Contains(states, c.State) {
+		return c, nil
 	}
 	return nil, fmt.Errorf("%w: %s", ErrConnectionState, c.State)
 }
@@ -370,8 +369,7 @@ func (s *Stack) Connect(req ConnectRequest) (params.LocalReference, Result, erro
 	called := copyConnectionAddress(&req.CalledPartyAddress)
 	m := &CR{ProtocolClass: params.ProtocolClass{Class: 2}, CalledPartyAddress: *copyConnectionAddress(called), CallingPartyAddress: copyConnectionAddress(req.CallingPartyAddress), Data: clone(req.Data), Importance: limitImportance(MsgTypeCR, req.Importance)}
 	if !called.RouteOnSSN {
-		hop := s.cfg.HopCounter
-		m.HopCounter = &hop
+		m.HopCounter = new(s.cfg.HopCounter)
 	}
 	// Validate before reserving a reference or advancing SLS; Q.713 (03/01) Table 3.
 	if _, err := (MarshalOptions{MaxMessageSize: s.cfg.MaxMessageSize}).Marshal(m); err != nil {
@@ -533,8 +531,7 @@ func copyConnectionAddress(a *params.PartyAddress) *params.PartyAddress {
 	if a == nil {
 		return nil
 	}
-	v := a.Clone()
-	return &v
+	return new(a.Clone())
 }
 
 // ITU-T Q.713 (03/01) Table A.1: unqualified and unrecognized causes have no unique originator.

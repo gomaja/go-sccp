@@ -353,7 +353,7 @@ func TestConnectionEstablishmentExpiry(t *testing.T) {
 // ITU-T Q.714 (05/01) §3.8.3.3 a2 and §3.8.4: invalid CC classes
 // discard as syntax errors without changing the section or T(conn est).
 func TestConnectionInvalidConfirmationClassSyntaxDiscard(t *testing.T) {
-	for class := byte(0); class < 16; class++ {
+	for class := range byte(16) {
 		if class == 2 || class == 3 {
 			continue
 		}
@@ -935,9 +935,7 @@ func TestConnectionConcurrentLifecycles(t *testing.T) {
 	var wg sync.WaitGroup
 	errCh := make(chan error, 8)
 	for worker := range 8 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			fail := func(format string, args ...any) { errCh <- fmt.Errorf(format, args...) }
 			remote := params.LocalReference(0x200 + worker)
 			for range 20 {
@@ -1007,7 +1005,7 @@ func TestConnectionConcurrentLifecycles(t *testing.T) {
 					return
 				}
 			}
-		}()
+		})
 	}
 	wg.Wait()
 	close(errCh)
@@ -1197,9 +1195,7 @@ func TestConnectionConcurrentPublicMethods(t *testing.T) {
 	var wg sync.WaitGroup
 	errCh := make(chan error, 8)
 	for worker := range 8 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for range 30 {
 				switch worker % 4 {
 				case 0:
@@ -1228,7 +1224,7 @@ func TestConnectionConcurrentPublicMethods(t *testing.T) {
 					}
 				}
 			}
-		}()
+		})
 	}
 	wg.Wait()
 	close(errCh)

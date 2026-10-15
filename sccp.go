@@ -102,6 +102,8 @@ func (e UnsupportedTypeError) Error() string {
 }
 
 // Message is an SCCP message. Every implementation is defined in this package.
+// A Message is an encoding.BinaryAppender, an encoding.BinaryMarshaler and an
+// encoding.BinaryUnmarshaler.
 type Message interface {
 	// MessageType returns the message type code.
 	MessageType() MsgType

@@ -243,8 +243,7 @@ func cloneImportance(i *params.Importance) *params.Importance {
 	if i == nil {
 		return nil
 	}
-	v := *i
-	return &v
+	return new(*i)
 }
 
 // checkCalledAddress refuses a called party address the originating node must
@@ -292,8 +291,7 @@ func limitImportance(t MsgType, i *params.Importance) *params.Importance {
 	case MsgTypeCR, MsgTypeCC, MsgTypeCREF:
 		limit = 4
 	}
-	v := min(*i, limit)
-	return &v
+	return new(min(*i, limit))
 }
 
 type frozenReference struct {
@@ -495,8 +493,7 @@ func (s *Stack) reject(u *unitdata, returnOnError bool, cause params.ReturnCause
 func (s *Stack) returnMessage(u *unitdata, cause params.ReturnCause, res *Result) {
 	var seg *params.Segmentation
 	if u.segmentation != nil {
-		v := *u.segmentation
-		seg = &v
+		seg = new(*u.segmentation)
 	}
 	xudts := func(data []byte) Message {
 		return &XUDTS{ReturnCause: cause, HopCounter: s.cfg.HopCounter, CalledPartyAddress: u.calling, CallingPartyAddress: u.called, Data: data, Segmentation: seg}

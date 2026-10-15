@@ -23,8 +23,7 @@ func FuzzParseMessage(f *testing.F) {
 	f.Fuzz(func(t *testing.T, wire []byte) {
 		m, err := sccp.ParseMessage(wire)
 		if err != nil {
-			var unsupported sccp.UnsupportedTypeError
-			if !errors.Is(err, sccp.ErrMalformedMessage) && !errors.As(err, &unsupported) {
+			if _, unsupported := errors.AsType[sccp.UnsupportedTypeError](err); !errors.Is(err, sccp.ErrMalformedMessage) && !unsupported {
 				t.Fatalf("ParseMessage(% x) returned an unclassified error: %v", wire, err)
 			}
 			return

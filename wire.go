@@ -12,11 +12,6 @@ import (
 	"github.com/gomaja/go-sccp/params"
 )
 
-// appender is a parameter that appends its contents to a buffer.
-type appender interface {
-	AppendBinary(b []byte) ([]byte, error)
-}
-
 // encoder builds one message in the canonical layout of ITU-T Q.713 (03/01)
 // §1.2 to §1.6: the message type, the mandatory fixed part, the pointers, the
 // mandatory variable parameters in pointer order with no gaps, then the
@@ -50,7 +45,7 @@ func (e *encoder) paramError(name string, err error) {
 }
 
 // fixed appends a mandatory fixed parameter (§1.3).
-func (e *encoder) fixed(name string, p appender) {
+func (e *encoder) fixed(name string, p encoding.BinaryAppender) {
 	if e.err != nil {
 		return
 	}
@@ -102,7 +97,7 @@ func (e *encoder) point(i int, name string) {
 }
 
 // lengthOf appends contents behind a one-octet length indicator (§2.2).
-func (e *encoder) lengthOf(name string, p appender) {
+func (e *encoder) lengthOf(name string, p encoding.BinaryAppender) {
 	if e.err != nil {
 		return
 	}
@@ -122,7 +117,7 @@ func (e *encoder) lengthOf(name string, p appender) {
 }
 
 // variable appends mandatory variable parameter i (§1.4).
-func (e *encoder) variable(i int, name string, p appender) {
+func (e *encoder) variable(i int, name string, p encoding.BinaryAppender) {
 	e.point(i, name)
 	e.lengthOf(name, p)
 }
@@ -206,7 +201,7 @@ func (e *encoder) longData(i int, name string, data []byte, maxLen int) {
 
 // optional appends an optional parameter: name, length indicator and contents
 // (§1.5). The first one sets the pointer to the optional part.
-func (e *encoder) optional(code params.ParameterNameCode, name string, p appender) {
+func (e *encoder) optional(code params.ParameterNameCode, name string, p encoding.BinaryAppender) {
 	if e.err != nil {
 		return
 	}

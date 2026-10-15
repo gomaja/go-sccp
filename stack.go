@@ -5,6 +5,7 @@
 package sccp
 
 import (
+	"container/heap"
 	"context"
 	"errors"
 	"fmt"
@@ -573,49 +574,36 @@ type timer struct {
 	index    int // position in the heap, -1 when stopped or fired
 }
 
+// timerHeap orders the running timers by deadline, as a container/heap.
 type timerHeap []*timer
 
-func (h timerHeap) less(i, j int) bool { return h[i].deadline.Before(h[j].deadline) }
+func (h timerHeap) Len() int           { return len(h) }
+func (h timerHeap) Less(i, j int) bool { return h[i].deadline.Before(h[j].deadline) }
 
-func (h timerHeap) swap(i, j int) {
+func (h timerHeap) Swap(i, j int) {
 	h[i], h[j] = h[j], h[i]
 	h[i].index, h[j].index = i, j
 }
 
-func (h timerHeap) up(i int) {
-	for i > 0 {
-		p := (i - 1) / 2
-		if !h.less(i, p) {
-			return
-		}
-		h.swap(i, p)
-		i = p
-	}
+func (h *timerHeap) Push(x any) {
+	t := x.(*timer)
+	t.index = len(*h)
+	*h = append(*h, t)
 }
 
-func (h timerHeap) down(i int) {
-	for {
-		l := 2*i + 1
-		if l >= len(h) {
-			return
-		}
-		c := l
-		if r := l + 1; r < len(h) && h.less(r, l) {
-			c = r
-		}
-		if !h.less(c, i) {
-			return
-		}
-		h.swap(i, c)
-		i = c
-	}
+func (h *timerHeap) Pop() any {
+	old := *h
+	t := old[len(old)-1]
+	old[len(old)-1] = nil
+	*h = old[:len(old)-1]
+	t.index = -1
+	return t
 }
 
 // schedule starts a timer that calls fire at the deadline.
 func (s *Stack) schedule(deadline time.Time, fire func(now time.Time, res *Result)) *timer {
-	t := &timer{deadline: deadline, fire: fire, index: len(s.timers)}
-	s.timers = append(s.timers, t)
-	s.timers.up(t.index)
+	t := &timer{deadline: deadline, fire: fire}
+	heap.Push(&s.timers, t)
 	if t.index == 0 {
 		select {
 		case s.wake <- struct{}{}:
@@ -630,24 +618,12 @@ func (s *Stack) stop(t *timer) {
 	if t == nil || t.index < 0 {
 		return
 	}
-	i, last := t.index, len(s.timers)-1
-	if i != last {
-		s.timers.swap(i, last)
-	}
-	s.timers[last] = nil
-	s.timers = s.timers[:last]
-	if i != last {
-		s.timers.down(i)
-		s.timers.up(i)
-	}
-	t.index = -1
+	heap.Remove(&s.timers, t.index)
 }
 
 // expire fires every timer due at now, in deadline order.
 func (s *Stack) expire(now time.Time, res *Result) {
 	for len(s.timers) > 0 && !s.timers[0].deadline.After(now) {
-		t := s.timers[0]
-		s.stop(t)
-		t.fire(now, res)
+		heap.Pop(&s.timers).(*timer).fire(now, res)
 	}
 }
