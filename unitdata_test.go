@@ -43,7 +43,7 @@ const (
 	pcB = 0x0202 // destination node
 )
 
-func newStack(t *testing.T, clock *fakeClock, pc uint32, cfg sccp.StackConfig, ssns ...uint8) *sccp.Stack {
+func newStack(t testing.TB, clock *fakeClock, pc uint32, cfg sccp.StackConfig, ssns ...uint8) *sccp.Stack {
 	t.Helper()
 	cfg.PointCode = pc
 	if clock != nil {
