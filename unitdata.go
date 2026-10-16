@@ -11,6 +11,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/gomaja/go-pointcode"
 	"github.com/gomaja/go-sccp/params"
 )
 
@@ -604,7 +605,7 @@ func (s *Stack) handleService(label RoutingLabel, m Message, local bool, res *Re
 // reassemblyPeer identifies a signalling point in its network,
 // ITU-T Q.711 (03/01) §6.1.1.2.2.
 type reassemblyPeer struct {
-	ni  NetworkIndicator
+	ni  pointcode.NetworkIndicator
 	opc uint32
 }
 

@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gomaja/go-pointcode"
 	"github.com/gomaja/go-sccp/params"
 )
 
@@ -123,9 +124,9 @@ func FuzzConnectionTransfer(f *testing.F) {
 			userDisconnected[1] = true
 			check(r)
 		}
-		check(s.HandleTransfer(TransferIndication{RoutingLabel: RoutingLabel{OPC: 2, DPC: 1, SLS: 8, NI: NetworkIndicator(state >> 5 & 3)}, Data: wire}))
+		check(s.HandleTransfer(TransferIndication{RoutingLabel: RoutingLabel{OPC: 2, DPC: 1, SLS: 8, NI: pointcode.NetworkIndicator(state >> 5 & 3)}, Data: wire}))
 		// A second transfer exercises partial reassembly, duplicate messages and released references.
-		check(s.HandleTransfer(TransferIndication{RoutingLabel: RoutingLabel{OPC: 2, DPC: 1, SLS: 8, NI: NetworkIndicator(state >> 5 & 3)}, Data: wire}))
+		check(s.HandleTransfer(TransferIndication{RoutingLabel: RoutingLabel{OPC: 2, DPC: 1, SLS: 8, NI: pointcode.NetworkIndicator(state >> 5 & 3)}, Data: wire}))
 		now = now.Add(time.Hour)
 		check(s.HandleTimeout())
 		now = now.Add(time.Hour)

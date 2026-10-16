@@ -37,7 +37,7 @@ import (
 	"io"
 )
 
-//go:generate stringer -type MsgType,SCMGType,SCCPService,NetworkIndicator -linecomment -output constant_string.go
+//go:generate stringer -type MsgType,SCMGType,SCCPService -linecomment -output constant_string.go
 
 // MsgType is the SCCP message type code, ITU-T Q.713 (03/01) §2.1, Table 1.
 type MsgType uint8

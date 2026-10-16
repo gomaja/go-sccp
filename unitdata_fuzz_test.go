@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gomaja/go-pointcode"
 	"github.com/gomaja/go-sccp/params"
 )
 
@@ -137,7 +138,7 @@ func FuzzUnitdataTransfer(f *testing.F) {
 				script = script[2+n:]
 				// Bit 4 moves the message to another link, another SLS; bit 5
 				// to another peer, another OPC; bits 6-7 select the network.
-				check(s.HandleTransfer(TransferIndication{RoutingLabel: RoutingLabel{OPC: 1 + uint32(op>>5&1), DPC: 2, SLS: op >> 4 & 1, NI: NetworkIndicator(op >> 6)}, Data: msg}))
+				check(s.HandleTransfer(TransferIndication{RoutingLabel: RoutingLabel{OPC: 1 + uint32(op>>5&1), DPC: 2, SLS: op >> 4 & 1, NI: pointcode.NetworkIndicator(op >> 6)}, Data: msg}))
 			case 2:
 				now = now.Add(time.Duration(op>>2) * time.Second)
 				check(s.HandleTimeout())

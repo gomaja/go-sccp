@@ -29,6 +29,7 @@ import (
 
 	"github.com/gomaja/go-m3ua"
 	m3params "github.com/gomaja/go-m3ua/messages/params"
+	"github.com/gomaja/go-pointcode"
 	"github.com/gomaja/go-sctp"
 
 	"github.com/gomaja/go-sccp"
@@ -49,7 +50,7 @@ func main() {
 		wait        = flag.Duration("wait", 2*time.Second, "Time to wait for returned messages after the last request.")
 		opc         = flag.Uint("opc", 0x0101, "Point code of this node (ITU, 14 bits).")
 		dpc         = flag.Uint("dpc", 0x0202, "Point code of the destination SCCP node.")
-		ni          = flag.Uint("ni", 0, "MTP network indicator of the messages this node originates: 0 international, 2 national (ITU-T Q.704 §14.2.2).")
+		ni          pointcode.NetworkIndicator
 		rc          = flag.Uint("routing-context", 1, "M3UA Routing Context.")
 		calledGT    = flag.String("called-gt", "447700900001", "Called party global title digits (E.164); empty routes on SSN.")
 		calledSSN   = flag.Uint("called-ssn", 6, "Called party subsystem number.")
@@ -60,6 +61,7 @@ func main() {
 		segmentAtZ  = flag.Int("segmentation-threshold", 0, "Z of ITU-T Q.714 §4.1.1.1.1: segment user data longer than this into segments of at most this length; 0 segments only what does not fit.")
 		returnOnErr = flag.Bool("return-on-error", true, "Request the message return procedure.")
 	)
+	flag.TextVar(&ni, "ni", pointcode.NIInternational, "MTP network indicator of the messages this node originates: international, international-spare, national or national-reserved (ITU-T Q.704 §14.2.2).")
 	flag.Parse()
 
 	payload, err := hex.DecodeString(*data)
@@ -77,7 +79,7 @@ func main() {
 
 	stack, err := sccp.NewStack(sccp.StackConfig{
 		PointCode:             uint32(*opc),
-		NetworkIndicator:      sccp.NetworkIndicator(*ni),
+		NetworkIndicator:      ni,
 		MaxMessageSize:        *maxMessage,
 		SegmentationThreshold: *segmentAtZ,
 	})
@@ -157,7 +159,7 @@ func main() {
 			}
 			pd := message.ProtocolData
 			send(stack.HandleTransfer(sccp.TransferIndication{
-				RoutingLabel: sccp.RoutingLabel{OPC: pd.OriginatingPointCode, DPC: pd.DestinationPointCode, SLS: pd.SignallingLinkSelection, NI: sccp.NetworkIndicator(pd.NetworkIndicator)},
+				RoutingLabel: sccp.RoutingLabel{OPC: pd.OriginatingPointCode, DPC: pd.DestinationPointCode, SLS: pd.SignallingLinkSelection, NI: pointcode.NetworkIndicator(pd.NetworkIndicator)},
 				Data:         pd.Data,
 			}))
 		}

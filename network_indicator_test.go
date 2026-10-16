@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gomaja/go-pointcode"
 	"github.com/gomaja/go-sccp/params"
 )
 
@@ -43,7 +44,7 @@ func TestStackRoutingConfig(t *testing.T) {
 }
 
 func TestRoutingOrigination(t *testing.T) {
-	for _, ni := range []NetworkIndicator{NIInternational, NINational} {
+	for _, ni := range []pointcode.NetworkIndicator{pointcode.NIInternational, pointcode.NINational} {
 		for _, dpc := range []uint32{2, 0x3fff, 0x4000} {
 			for _, connect := range []bool{false, true} {
 				t.Run(fmt.Sprintf("ni_%d/dpc_%x/connect_%t", ni, dpc, connect), func(t *testing.T) {
@@ -145,10 +146,10 @@ func TestNetworkReturns(t *testing.T) {
 	} {
 		t.Run(tc.want.String(), func(t *testing.T) {
 			s, _ := coTestStack(t, StackConfig{})
-			in := RoutingLabel{OPC: 2, DPC: 1, SLS: 7, NI: NINational}
+			in := RoutingLabel{OPC: 2, DPC: 1, SLS: 7, NI: pointcode.NINational}
 			res := coTestReceive(t, s, in, tc.m)
 			coTestCounts(t, res, 1, 0, 1)
-			want := RoutingLabel{OPC: 1, DPC: 2, SLS: 7, NI: NINational}
+			want := RoutingLabel{OPC: 1, DPC: 2, SLS: 7, NI: pointcode.NINational}
 			if res.Transfers[0].RoutingLabel != want || res.Transfers[0].Message.MessageType() != tc.want || res.Discards[0].RoutingLabel != in {
 				t.Fatalf("return %+v", res)
 			}
@@ -160,17 +161,17 @@ func TestNetworkReassembly(t *testing.T) {
 	for _, budget := range []int{0, 8} {
 		t.Run(fmt.Sprintf("peer_budget_%d", budget), func(t *testing.T) {
 			s, _ := coTestStack(t, StackConfig{MaxReassemblyOctetsPerPeer: budget})
-			segment := func(ni NetworkIndicator, first bool) Result {
+			segment := func(ni pointcode.NetworkIndicator, first bool) Result {
 				rem := uint8(0)
 				if first {
 					rem = 1
 				}
 				return coTestReceive(t, s, RoutingLabel{OPC: 2, DPC: 1, SLS: 7, NI: ni}, &XUDT{ProtocolClass: params.ProtocolClass{Class: 1, ReturnOnError: true}, HopCounter: 15, CalledPartyAddress: params.NewSSNAddress(6), CallingPartyAddress: params.NewSSNAddress(7), Data: bytes.Repeat([]byte{byte(ni)}, 4), Segmentation: &params.Segmentation{FirstSegment: first, RemainingSegments: rem, LocalReference: 9}})
 			}
-			for _, ni := range []NetworkIndicator{NIInternational, NINational} {
+			for _, ni := range []pointcode.NetworkIndicator{pointcode.NIInternational, pointcode.NINational} {
 				coTestCounts(t, segment(ni, true), 0, 0, 0)
 			}
-			for _, ni := range []NetworkIndicator{NIInternational, NINational} {
+			for _, ni := range []pointcode.NetworkIndicator{pointcode.NIInternational, pointcode.NINational} {
 				res := segment(ni, false)
 				coTestCounts(t, res, 0, 1, 0)
 				u := res.Indications[0].(*UnitdataIndication)
@@ -188,11 +189,11 @@ func TestNetworkReassembly(t *testing.T) {
 func TestNetworkPeerBudget(t *testing.T) {
 	s, _ := coTestStack(t, StackConfig{MaxReassemblyOctetsPerPeer: 8})
 	for _, tc := range []struct {
-		ni     NetworkIndicator
+		ni     pointcode.NetworkIndicator
 		sls    uint8
 		reject bool
 	}{
-		{NIInternational, 0, false}, {NINational, 0, false}, {NIInternational, 1, true}, {NINational, 1, true},
+		{pointcode.NIInternational, 0, false}, {pointcode.NINational, 0, false}, {pointcode.NIInternational, 1, true}, {pointcode.NINational, 1, true},
 	} {
 		res := coTestReceive(t, s, RoutingLabel{OPC: 2, DPC: 1, SLS: tc.sls, NI: tc.ni}, &XUDT{ProtocolClass: params.ProtocolClass{Class: 1, ReturnOnError: true}, HopCounter: 15, CalledPartyAddress: params.NewSSNAddress(6), CallingPartyAddress: params.NewSSNAddress(7), Data: make([]byte, 5), Segmentation: &params.Segmentation{FirstSegment: true, RemainingSegments: 1, LocalReference: 9}})
 		if tc.reject {
@@ -207,8 +208,8 @@ func TestNetworkPeerBudget(t *testing.T) {
 }
 
 func TestNetworkConnections(t *testing.T) {
-	in := RoutingLabel{OPC: 2, DPC: 1, SLS: 7, NI: NINational}
-	out := RoutingLabel{OPC: 1, DPC: 2, SLS: 7, NI: NINational}
+	in := RoutingLabel{OPC: 2, DPC: 1, SLS: 7, NI: pointcode.NINational}
+	out := RoutingLabel{OPC: 1, DPC: 2, SLS: 7, NI: pointcode.NINational}
 	cr := &CR{SourceLocalReference: 9, ProtocolClass: params.ProtocolClass{Class: 2}, CalledPartyAddress: params.NewSSNAddress(6)}
 	t.Run("refuse", func(t *testing.T) {
 		s, _ := coTestStack(t, StackConfig{})
@@ -266,19 +267,19 @@ func TestNetworkConnections(t *testing.T) {
 	t.Run("confirming_network", func(t *testing.T) {
 		s, _ := coTestStack(t, StackConfig{})
 		ref, _ := coTestOutgoing(t, s)
-		res := coTestReceive(t, s, RoutingLabel{OPC: 3, DPC: 1, NI: NINational}, &CC{DestinationLocalReference: ref, SourceLocalReference: 9, ProtocolClass: params.ProtocolClass{Class: 2}})
+		res := coTestReceive(t, s, RoutingLabel{OPC: 3, DPC: 1, NI: pointcode.NINational}, &CC{DestinationLocalReference: ref, SourceLocalReference: 9, ProtocolClass: params.ProtocolClass{Class: 2}})
 		coTestCounts(t, res, 0, 1, 0)
 		info, _ := s.Connection(ref)
-		if info.Remote.DPC != 3 || info.Remote.NI != NINational {
+		if info.Remote.DPC != 3 || info.Remote.NI != pointcode.NINational {
 			t.Fatalf("confirming peer %+v", info.Remote)
 		}
-		res = coTestReceive(t, s, RoutingLabel{OPC: 3, DPC: 1, NI: NINational}, &DT1{DestinationLocalReference: ref, Data: []byte{1}})
+		res = coTestReceive(t, s, RoutingLabel{OPC: 3, DPC: 1, NI: pointcode.NINational}, &DT1{DestinationLocalReference: ref, Data: []byte{1}})
 		coTestCounts(t, res, 0, 1, 0)
 		res, err := s.Disconnect(ref, DisconnectRequest{})
 		if err != nil {
 			t.Fatal(err)
 		}
-		if res.Transfers[0].NI != NINational || res.Transfers[0].DPC != 3 {
+		if res.Transfers[0].NI != pointcode.NINational || res.Transfers[0].DPC != 3 {
 			t.Fatalf("release %+v", res)
 		}
 	})
@@ -287,18 +288,18 @@ func TestNetworkConnections(t *testing.T) {
 func TestNetworkConnectionMismatch(t *testing.T) {
 	s, _ := coTestStack(t, StackConfig{})
 	ref, _ := coTestEstablished(t, s)
-	in := RoutingLabel{OPC: 2, DPC: 1, SLS: 7, NI: NINational}
+	in := RoutingLabel{OPC: 2, DPC: 1, SLS: 7, NI: pointcode.NINational}
 	res := coTestReceive(t, s, in, &RLSD{DestinationLocalReference: ref, SourceLocalReference: 0x102})
 	coTestCounts(t, res, 1, 0, 1)
 	if !errors.Is(res.Discards[0].Reason, ErrConnectionReference) || res.Discards[0].RoutingLabel != in {
 		t.Fatalf("discard %+v", res)
 	}
-	coTestTransfer(t, res, 0, RoutingLabel{OPC: 1, DPC: 2, SLS: 7, NI: NINational}, &ERR{DestinationLocalReference: 0x102, ErrorCause: params.ErrorCausePointCodeMismatch})
+	coTestTransfer(t, res, 0, RoutingLabel{OPC: 1, DPC: 2, SLS: 7, NI: pointcode.NINational}, &ERR{DestinationLocalReference: 0x102, ErrorCause: params.ErrorCausePointCodeMismatch})
 	coTestState(t, s, ref, ConnectionEstablished)
 }
 
 func TestNetworkIndications(t *testing.T) {
-	in := RoutingLabel{OPC: 2, DPC: 1, SLS: 7, NI: NINational}
+	in := RoutingLabel{OPC: 2, DPC: 1, SLS: 7, NI: pointcode.NINational}
 	t.Run("notice", func(t *testing.T) {
 		s, _ := coTestStack(t, StackConfig{})
 		res := coTestReceive(t, s, in, &UDTS{ReturnCause: params.ReturnCauseUnequippedUser, CalledPartyAddress: params.NewSSNAddress(6), CallingPartyAddress: params.NewSSNAddress(7), Data: []byte{1}})
@@ -315,7 +316,7 @@ func TestNetworkIndications(t *testing.T) {
 		s, _ := coTestStack(t, StackConfig{})
 		res := coTestReceive(t, s, in, &XUDT{ProtocolClass: params.ProtocolClass{ReturnOnError: true}, HopCounter: 1, CalledPartyAddress: params.NewGlobalTitleAddress(gt, 6), CallingPartyAddress: params.NewPointCodeAddress(3, 7), Data: []byte{1}})
 		coTestCounts(t, res, 1, 1, 1)
-		if res.Indications[0].(*MaintenanceIndication).RoutingLabel != in || res.Transfers[0].NI != NINational || res.Transfers[0].DPC != 3 {
+		if res.Indications[0].(*MaintenanceIndication).RoutingLabel != in || res.Transfers[0].NI != pointcode.NINational || res.Transfers[0].DPC != 3 {
 			t.Fatalf("maintenance and return %+v", res)
 		}
 	})
@@ -330,8 +331,8 @@ func TestNetworkIndications(t *testing.T) {
 }
 
 func TestNetworkMismatchResponses(t *testing.T) {
-	in := RoutingLabel{OPC: 2, DPC: 1, SLS: 7, NI: NINational}
-	out := RoutingLabel{OPC: 1, DPC: 2, SLS: 7, NI: NINational}
+	in := RoutingLabel{OPC: 2, DPC: 1, SLS: 7, NI: pointcode.NINational}
+	out := RoutingLabel{OPC: 1, DPC: 2, SLS: 7, NI: pointcode.NINational}
 	for _, tc := range []struct {
 		name           string
 		incoming, want Message
