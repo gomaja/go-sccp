@@ -159,7 +159,7 @@ func main() {
 			}
 			pd := message.ProtocolData
 			send(stack.HandleTransfer(sccp.TransferIndication{
-				RoutingLabel: sccp.RoutingLabel{OPC: pd.OriginatingPointCode, DPC: pd.DestinationPointCode, SLS: pd.SignallingLinkSelection, NI: pointcode.NetworkIndicator(pd.NetworkIndicator)},
+				RoutingLabel: sccp.RoutingLabel{OPC: pd.OriginatingPointCode, DPC: pd.DestinationPointCode, SLS: pd.SignallingLinkSelection, NI: pd.NetworkIndicator},
 				Data:         pd.Data,
 			}))
 		}
@@ -224,7 +224,7 @@ func transfer(ctx context.Context, endpoint *m3ua.Endpoint, tr sccp.TransferRequ
 	request := m3ua.MTPTransferRequest{
 		MTPRoute: "sccp",
 		ProtocolData: m3params.NewProtocolDataPayload(
-			tr.OPC, tr.DPC, m3params.ServiceIndSCCP, uint8(tr.NI), 0, tr.SLS, tr.Data),
+			tr.OPC, tr.DPC, m3params.ServiceIndSCCP, tr.NI, 0, tr.SLS, tr.Data),
 	}
 	for attempt := 0; ; attempt++ {
 		_, err := endpoint.MTPTransferContext(ctx, request)

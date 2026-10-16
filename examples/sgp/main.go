@@ -28,7 +28,6 @@ import (
 	"github.com/gomaja/go-m3ua"
 	"github.com/gomaja/go-m3ua/messages"
 	m3params "github.com/gomaja/go-m3ua/messages/params"
-	"github.com/gomaja/go-pointcode"
 	"github.com/gomaja/go-sctp"
 
 	"github.com/gomaja/go-sccp"
@@ -111,7 +110,7 @@ func serve(ctx context.Context, stack *sccp.Stack, listener *m3ua.Listener, as m
 		}
 		pd := message.ProtocolData
 		deliver(stack, listener, as, stack.HandleTransfer(sccp.TransferIndication{
-			RoutingLabel: sccp.RoutingLabel{OPC: pd.OriginatingPointCode, DPC: pd.DestinationPointCode, SLS: pd.SignallingLinkSelection, NI: pointcode.NetworkIndicator(pd.NetworkIndicator)},
+			RoutingLabel: sccp.RoutingLabel{OPC: pd.OriginatingPointCode, DPC: pd.DestinationPointCode, SLS: pd.SignallingLinkSelection, NI: pd.NetworkIndicator},
 			Data:         pd.Data,
 		}))
 	}
@@ -146,7 +145,7 @@ func deliver(stack *sccp.Stack, listener *m3ua.Listener, as m3ua.ASKey, res sccp
 	}
 	for _, tr := range res.Transfers {
 		data := messages.NewData(m3params.NewNetworkAppearance(as.NetworkAppearance), m3params.NewRoutingContext(as.RoutingContext),
-			m3params.NewProtocolData(tr.OPC, tr.DPC, m3params.ServiceIndSCCP, uint8(tr.NI), 0, tr.SLS, tr.Data), nil)
+			m3params.NewProtocolData(tr.OPC, tr.DPC, m3params.ServiceIndSCCP, tr.NI, 0, tr.SLS, tr.Data), nil)
 		distribution, err := listener.DistributeData(data)
 		switch {
 		case err != nil:
