@@ -11,7 +11,8 @@ Q.714 procedure stack with connectionless segmentation and reassembly.
 
 The library performs no I/O and depends on no transport. The examples run it
 over M3UA with [go-m3ua](https://github.com/gomaja/go-m3ua) and
-[go-sctp](https://github.com/gomaja/go-sctp).
+[go-sctp](https://github.com/gomaja/go-sctp). The library takes the
+network indicator type from [go-pointcode](https://github.com/gomaja/go-pointcode).
 
 ## Installation
 

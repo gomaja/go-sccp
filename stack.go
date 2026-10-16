@@ -13,20 +13,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gomaja/go-pointcode"
 	"github.com/gomaja/go-sccp/params"
-)
-
-// NetworkIndicator is the network indicator of the service information
-// octet, ITU-T Q.704 (07/96) §14.2.2. It identifies the network in which
-// point codes are meaningful.
-type NetworkIndicator uint8
-
-// Network indicators, ITU-T Q.704 (07/96) §14.2.2.
-const (
-	NIInternational    NetworkIndicator = 0 // international network
-	NISpare            NetworkIndicator = 1 // spare (for international use only)
-	NINational         NetworkIndicator = 2 // national network
-	NINationalReserved NetworkIndicator = 3 // reserved for national use
 )
 
 // RoutingLabel is the MTP routing information of a message: the routing label
@@ -42,7 +30,7 @@ type RoutingLabel struct {
 	// SLS is the 4-bit signalling link selection, ITU-T Q.704 (07/96) §2.2.4.
 	SLS uint8
 	// NI is the 2-bit network indicator, ITU-T Q.704 (07/96) §14.2.2.
-	NI NetworkIndicator
+	NI pointcode.NetworkIndicator
 }
 
 // TransferIndication is an MTP-TRANSFER indication, ITU-T Q.711 (03/01)
@@ -240,11 +228,11 @@ type StackConfig struct {
 	PointCode uint32
 
 	// NetworkIndicator is the network of messages originated for N-UNITDATA
-	// and N-CONNECT requests. Zero is the international network. The stack
+	// and N-CONNECT requests. Zero is pointcode.NIInternational. The stack
 	// answers a received message in the network it came from. A node
 	// originating in several networks runs one Stack per network, each with
 	// its point code there (ITU-T Q.711 (03/01) §6.1.1.2.2).
-	NetworkIndicator NetworkIndicator
+	NetworkIndicator pointcode.NetworkIndicator
 
 	// MaxMessageSize is the largest SCCP message the stack sends, in octets.
 	// Zero selects DefaultMaxMessageSize, the narrowband MTP-SAP of ITU-T
@@ -377,7 +365,7 @@ func NewStack(cfg StackConfig) (*Stack, error) {
 	switch {
 	case cfg.PointCode > params.MaxPointCode:
 		return nil, fmt.Errorf("%w: point code %d exceeds %d", ErrInvalidRequest, cfg.PointCode, params.MaxPointCode)
-	case cfg.NetworkIndicator > NINationalReserved:
+	case !cfg.NetworkIndicator.Valid():
 		return nil, fmt.Errorf("%w: network indicator %d, want 0 to 3", ErrInvalidRequest, cfg.NetworkIndicator)
 	case cfg.MaxMessageSize < minMessageSize || cfg.MaxMessageSize > MaxBroadbandMessageSize:
 		return nil, fmt.Errorf("%w: maximum message size %d, want %d to %d", ErrInvalidRequest, cfg.MaxMessageSize, minMessageSize, MaxBroadbandMessageSize)
@@ -450,7 +438,7 @@ func (s *Stack) HandleTransfer(ind TransferIndication) Result {
 	// outside the standard routing label and network indicator fields.
 	var routingErr error
 	switch {
-	case ind.NI > NINationalReserved:
+	case !ind.NI.Valid():
 		routingErr = fmt.Errorf("%w: network indicator %d, want 0 to 3", ErrInvalidRequest, ind.NI)
 	case ind.OPC > params.MaxPointCode:
 		routingErr = fmt.Errorf("%w: originating point code %d exceeds %d", ErrInvalidRequest, ind.OPC, params.MaxPointCode)

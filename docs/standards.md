@@ -118,7 +118,9 @@ equal to the encoded message, with nil and empty slices equivalent.
 The MTP-SAP primitives carry the routing label and the network indicator of
 its SIO (ITU-T Q.711 (03/01) §7.2 Table 18; ITU-T Q.704 (07/96) §14.2.2),
 as does M3UA protocol data (RFC 4666 §3.3.1). Point codes are meaningful only
-in their network (ITU-T Q.711 (03/01) §6.1.1.2.2). The standard label has
+in their network (ITU-T Q.711 (03/01) §6.1.1.2.2). The indicator is
+`pointcode.NetworkIndicator` from
+[go-pointcode](https://github.com/gomaja/go-pointcode). The standard label has
 14-bit OPC and DPC and a 4-bit SLS, including in national applications
 (ITU-T Q.704 (07/96) §§2.2.1-2.2.4); the NI has two bits. The stack refuses
 wider values instead of truncating them. Responses go to the network of the
