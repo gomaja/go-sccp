@@ -1,7 +1,7 @@
 github.com/gomaja/go-ctxsync v0.0.0-20261015170731-23c9cb67b19b h1:uZUS8FpD0aJfzLwz4sVXuZy7QeBkNr2S0w6yMfNJGa0=
 github.com/gomaja/go-ctxsync v0.0.0-20261015170731-23c9cb67b19b/go.mod h1:DHmXkdnCX0SXFMVg+lQy+VX3T+8wOl9pyHL59VMzcPw=
-github.com/gomaja/go-m3ua v0.0.0-20261016083734-f17bad90e666 h1:eAt9PqQdoCj9stGIEfat4yPZ5CdLF0zPrbsPCbPXqAM=
-github.com/gomaja/go-m3ua v0.0.0-20261016083734-f17bad90e666/go.mod h1:DO7/dBlLpBZRjKCRj5ejekKisQdOCN52iGDgBYkX8Fw=
+github.com/gomaja/go-m3ua v0.0.0-20261016204009-3ad7149f3a21 h1:dXY2gdxI1jaHY5z1zbULXEqZ7bW2JdHEKXy8SmUK5Gw=
+github.com/gomaja/go-m3ua v0.0.0-20261016204009-3ad7149f3a21/go.mod h1:DO7/dBlLpBZRjKCRj5ejekKisQdOCN52iGDgBYkX8Fw=
 github.com/gomaja/go-pointcode v0.0.0-20261015102047-53f963a604bd h1:n1swzbzyzoKaeylXfuMeYQoaMpNbM9M9o/KR14hBTxw=
 github.com/gomaja/go-pointcode v0.0.0-20261015102047-53f963a604bd/go.mod h1:NAsi6anBNB3+ouwMYUncMwB9fz7Ye1Q00bHWz0yJwWc=
 github.com/gomaja/go-sctp v0.0.0-20261016073553-b48239f970d4 h1:9M2c2XsoUCPsWKBKNGv96XB8mJhTuIIlzzSodYh1mSs=
