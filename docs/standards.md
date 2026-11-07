@@ -175,6 +175,15 @@ fits.
 
 - User data that fits one message goes in a UDT, or an XUDT when an importance
   is requested or the stack is configured for XUDT.
+- With `StackConfig.UseLUDT`, user data that no UDT or XUDT carries goes in
+  one LUDT if it fits the request's maximum message size. LUDT is a network
+  option (§1.1.2) that a recipient may not understand (§2.5). It carries the
+  requested class, which a relay copies into the segments' in-sequence option,
+  and the segmentation parameter (§4.1.1.1.2, last item; Q.713 Table 21 Note
+  1): first segment, none remaining, the request's in-sequence option and a
+  frozen local reference. It needs a maximum above the narrowband 268 octets.
+  Segments remain XUDTs ("the use of LUDT messages is for further study",
+  §4.1.1.1.2), and Z still applies to user data one UDT or XUDT carries.
 - An N-UNITDATA request may name the maximum message size of the MTP-SAP it
   leaves on (`UnitdataRequest.MaxMessageSize`, smaller or larger than the
   stack's): the segment size follows "local knowledge of the network status"

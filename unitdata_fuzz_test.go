@@ -5,6 +5,7 @@
 package sccp
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"maps"
@@ -20,6 +21,9 @@ import (
 // a stack with small reassembly bounds. After every step it checks the
 // reassembly bookkeeping (ITU-T Q.714 (05/01) §4.1.1.2) and that every message
 // the stack sends is a valid service message within its maximum message size.
+// Requests vary the data, per-request maximum and UseLUDT; their encoded
+// transfers must fit that maximum and deliver the original data to a second
+// stack, with an LUDT carrying the whole request and relay segmentation data.
 //
 // A script is a sequence of steps: an operation octet, then for a message a
 // two-octet length, least significant octet first, and the message octets.
@@ -43,21 +47,32 @@ func FuzzUnitdataTransfer(f *testing.F) {
 		}
 		return b
 	}
-	f.Add(script(step(0, segment(1, true, 2, 200, true)), step(0, segment(1, false, 1, 200, false)), step(0, segment(1, false, 0, 100, false))), 0)
-	f.Add(script(step(0, segment(2, true, 2, 200, true)), step(0, segment(2, false, 0, 200, true)), step(0, segment(2, false, 1, 200, true))), 0)
-	f.Add(script(step(0, segment(3, false, 3, 100, true)), step(0, segment(3, false, 2, 100, true)), step(2, nil), step(0, segment(3, false, 1, 100, true))), 0)
-	f.Add(script(step(0, segment(4, true, 3, 240, true)), step(3, nil), step(0, segment(4, false, 2, 240, true)), step(3, nil), step(0, segment(4, true, 1, 50, false))), 0)
-	f.Add(script(step(0, segment(5, true, 15, 240, true)), step(0, segment(6, true, 15, 240, true)), step(0, segment(7, true, 15, 240, true)), step(0, segment(8, true, 1, 10, true))), 0)
+	seed := func(script []byte, size int) {
+		for _, useLUDT := range []bool{false, true} {
+			f.Add(script, size, useLUDT, bytes.Repeat([]byte{0xa5, 0x5a}, 300))
+		}
+	}
+	seed(script(step(0, segment(1, true, 2, 200, true)), step(0, segment(1, false, 1, 200, false)), step(0, segment(1, false, 0, 100, false))), 0)
+	seed(script(step(0, segment(2, true, 2, 200, true)), step(0, segment(2, false, 0, 200, true)), step(0, segment(2, false, 1, 200, true))), 0)
+	seed(script(step(0, segment(3, false, 3, 100, true)), step(0, segment(3, false, 2, 100, true)), step(2, nil), step(0, segment(3, false, 1, 100, true))), 0)
+	seed(script(step(0, segment(4, true, 3, 240, true)), step(3, nil), step(0, segment(4, false, 2, 240, true)), step(3, nil), step(0, segment(4, true, 1, 50, false))), 0)
+	seed(script(step(0, segment(5, true, 15, 240, true)), step(0, segment(6, true, 15, 240, true)), step(0, segment(7, true, 15, 240, true)), step(0, segment(8, true, 1, 10, true))), 0)
 
-	f.Add(script(step(0, segment(9, true, 1, 200, true)), step(128, segment(9, true, 1, 200, true)), step(0, segment(9, false, 0, 100, false)), step(128, segment(9, false, 0, 100, false))), 0)
+	seed(script(step(0, segment(9, true, 1, 200, true)), step(128, segment(9, true, 1, 200, true)), step(0, segment(9, false, 0, 100, false)), step(128, segment(9, false, 0, 100, false))), 0)
 
 	for _, size := range []int{0, minMessageSize, DefaultMaxMessageSize, MaxBroadbandMessageSize, -1, minMessageSize - 1, MaxBroadbandMessageSize + 1} {
-		f.Add(script(), size)
+		seed(script(), size)
 	}
 
-	f.Fuzz(func(t *testing.T, script []byte, size int) {
+	for _, n := range []int{0, 1, 159, 160, 161, 255, 256, 1000, MaxLongData, MaxLongData + 1} {
+		for _, useLUDT := range []bool{false, true} {
+			f.Add([]byte{}, MaxBroadbandMessageSize, useLUDT, bytes.Repeat([]byte{0x37}, n))
+		}
+	}
+
+	f.Fuzz(func(t *testing.T, script []byte, size int, useLUDT bool, data []byte) {
 		now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-		s, err := NewStack(StackConfig{PointCode: 2, MaxReassemblies: 3, MaxReassemblyOctets: 600, MaxReassemblyOctetsPerPeer: 400,
+		s, err := NewStack(StackConfig{PointCode: 2, UseLUDT: useLUDT, MaxReassemblies: 3, MaxReassemblyOctets: 600, MaxReassemblyOctetsPerPeer: 400,
 			ReassemblyTimeout: 10 * time.Second, Now: func() time.Time { return now }})
 		if err != nil {
 			t.Fatal(err)
@@ -67,19 +82,69 @@ func FuzzUnitdataTransfer(f *testing.F) {
 		if effectiveSize == 0 {
 			effectiveSize = s.cfg.MaxMessageSize
 		}
-		outbound, requestErr := s.Unitdata(UnitdataRequest{CalledPartyAddress: params.NewSSNAddress(8), CallingPartyAddress: params.NewSSNAddress(7), ProtocolClass: 1, Data: make([]byte, 600), DPC: 2, MaxMessageSize: size})
-		if size != 0 && (size < minMessageSize || size > MaxBroadbandMessageSize) {
+		req := UnitdataRequest{CalledPartyAddress: params.NewSSNAddress(8), CallingPartyAddress: params.NewSSNAddress(7), ProtocolClass: uint8(len(data) & 1), Data: data, DPC: 2, MaxMessageSize: size}
+		outbound, requestErr := s.Unitdata(req)
+		switch {
+		case len(data) == 0:
+			if !errors.Is(requestErr, ErrInvalidRequest) {
+				t.Fatalf("empty request: %v", requestErr)
+			}
+		case len(data) > MaxLongData:
+			if !errors.Is(requestErr, ErrSegmentation) {
+				t.Fatalf("long request: %v", requestErr)
+			}
+		case size != 0 && (size < minMessageSize || size > MaxBroadbandMessageSize):
 			if !errors.Is(requestErr, ErrInvalidRequest) {
 				t.Fatalf("N-UNITDATA maximum %d: %v, want ErrInvalidRequest", size, requestErr)
 			}
-		} else {
-			if errors.Is(requestErr, ErrInvalidRequest) {
+		default:
+			if requestErr != nil && !errors.Is(requestErr, ErrSegmentation) {
 				t.Fatalf("N-UNITDATA maximum %d: %v", size, requestErr)
 			}
-			for _, out := range outbound.Transfers {
-				if len(out.Data) > effectiveSize {
-					t.Fatalf("N-UNITDATA maximum %d sent %d octets", effectiveSize, len(out.Data))
+		}
+		if requestErr != nil && len(outbound.Transfers) != 0 {
+			t.Fatal("failed request sent data")
+		}
+		far, err := NewStack(StackConfig{PointCode: 2, MaxMessageSize: MaxBroadbandMessageSize})
+		if err != nil {
+			t.Fatal(err)
+		}
+		far.RegisterSubsystem(8)
+		var delivered []*UnitdataIndication
+		for _, out := range outbound.Transfers {
+			if len(out.Data) > effectiveSize {
+				t.Fatalf("N-UNITDATA maximum %d sent %d octets", effectiveSize, len(out.Data))
+			}
+			m, err := ParseMessage(out.Data)
+			if err != nil {
+				t.Fatalf("outbound message: %v", err)
+			}
+			if l, ok := m.(*LUDT); ok {
+				if !useLUDT || effectiveSize <= DefaultMaxMessageSize {
+					t.Fatal("LUDT without opt-in and broadband maximum")
 				}
+				if len(outbound.Transfers) != 1 || !bytes.Equal(l.Data, data) {
+					t.Fatal("LUDT did not carry the whole request alone")
+				}
+				if l.ProtocolClass.Class != req.ProtocolClass || l.Segmentation == nil || !l.Segmentation.FirstSegment || l.Segmentation.RemainingSegments != 0 || l.Segmentation.InSequenceDelivery != (req.ProtocolClass == 1) {
+					t.Fatal("LUDT class or relay segmentation parameter differs")
+				}
+			}
+			res := far.HandleTransfer(TransferIndication{RoutingLabel: out.RoutingLabel, Data: out.Data})
+			if len(res.Discards) != 0 || len(res.Transfers) != 0 {
+				t.Fatalf("round trip: %+v", res)
+			}
+			for _, ind := range res.Indications {
+				u, ok := ind.(*UnitdataIndication)
+				if !ok {
+					t.Fatalf("round trip indication: %T", ind)
+				}
+				delivered = append(delivered, u)
+			}
+		}
+		if requestErr == nil {
+			if len(delivered) != 1 || !bytes.Equal(delivered[0].Data, data) || delivered[0].ProtocolClass != req.ProtocolClass || delivered[0].Segments != len(outbound.Transfers) {
+				t.Fatalf("round trip delivered %d indications for %d octets", len(delivered), len(data))
 			}
 		}
 		available := true

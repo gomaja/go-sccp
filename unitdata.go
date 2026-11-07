@@ -43,6 +43,7 @@ type UnitdataRequest struct {
 	// larger than the stack's, since the segment size follows "local knowledge
 	// of the network status" (ITU-T Q.714 (05/01) §4.1.1.1.2). Zero selects
 	// StackConfig.MaxMessageSize; otherwise it is 11 to MaxBroadbandMessageSize.
+	// With StackConfig.UseLUDT, it also bounds the single LUDT.
 	// One Stack thus serves routes of different sizes with one set of
 	// segmentation local references; two Stacks of one signalling point would
 	// allocate theirs independently and could give one calling party the same
@@ -58,9 +59,14 @@ type UnitdataRequest struct {
 //
 // User data that fits one message within the request's maximum message size
 // goes in a UDT, or an XUDT when the request has an importance or the stack is
-// configured with UseXUDT. Longer user data is segmented into at most 16 XUDT
-// messages, ITU-T Q.714 (05/01) §4.1.1.1.2: every segment is protocol class 1
-// with the same called and calling party addresses, DPC and SLS, and carries
+// configured with UseXUDT. With UseLUDT, user data that no UDT or XUDT carries
+// goes in one LUDT when that fits, with the segmentation parameter for a relay
+// that segments it (ITU-T Q.714 (05/01) §4.1.1.1.2, last item; ITU-T Q.713
+// (03/01) Table 21 Note 1). Otherwise longer user data is segmented into at
+// most 16 XUDT messages (§4.1.1.1.2), as is user data longer than the
+// segmentation threshold Z that one UDT or XUDT carries (§4.1.1.1.1). Every
+// segment is protocol class 1 with the same called and calling party
+// addresses, DPC and SLS, and carries
 // the segmentation parameter with the first-segment bit on the first, the
 // in-sequence delivery option of the request, the remaining segment count and
 // one segmentation local reference. Segments are as equal in size as
@@ -143,12 +149,37 @@ func (s *Stack) unitdata(now time.Time, req UnitdataRequest) ([]TransferRequest,
 
 	// §4.1.1.1.1: below Z the SCCP shall avoid segmentation.
 	z := s.cfg.SegmentationThreshold
-	if z == 0 || len(req.Data) < z {
-		if transfers, err := single(); err == nil {
-			return transfers, nil
+	transfers, singleErr := single()
+	if singleErr == nil && (z == 0 || len(req.Data) < z) {
+		return transfers, nil
+	}
+	if s.cfg.UseLUDT && singleErr != nil {
+		l := &LUDT{
+			ProtocolClass:       params.ProtocolClass{Class: req.ProtocolClass, ReturnOnError: req.ReturnOnError},
+			HopCounter:          s.cfg.HopCounter,
+			CalledPartyAddress:  req.CalledPartyAddress.Clone(),
+			CallingPartyAddress: req.CallingPartyAddress.Clone(),
+			Data:                clone(req.Data),
+			Importance:          limitImportance(MsgTypeLUDT, req.Importance),
+			// A relay may segment it: Q.713 (03/01) Table 21 Note 1;
+			// Q.714 (05/01) §4.1.1.1.2, last item. Keep the requested
+			// class, which the relay copies into the in-sequence option.
+			Segmentation: &params.Segmentation{FirstSegment: true, InSequenceDelivery: req.ProtocolClass == 1},
 		}
-		// What remains possible is that the user data does not fit one
-		// message: the parameters were checked above.
+		if _, err := limits.Marshal(l); err == nil {
+			// The reference does not change the size. Freeze one only when
+			// the LUDT fits, as for a segmented message (§4.1.1.1.2).
+			ref, err := s.allocateSegmentationReference(now)
+			if err != nil {
+				return nil, err
+			}
+			l.Segmentation.LocalReference = ref
+			b, err := limits.Marshal(l)
+			if err != nil {
+				return nil, fmt.Errorf("%w: LUDT: %w", ErrSegmentation, err)
+			}
+			return []TransferRequest{{RoutingLabel: label, Message: l, Data: b}}, nil
+		}
 	}
 
 	capacity := s.segmentCapacity(req, messageSize)
@@ -174,7 +205,7 @@ func (s *Stack) unitdata(now time.Time, req UnitdataRequest) ([]TransferRequest,
 		return nil, err
 	}
 
-	transfers := make([]TransferRequest, 0, n)
+	transfers = make([]TransferRequest, 0, n)
 	for i, chunk := range splitSegments(req.Data, n) {
 		x := &XUDT{
 			ProtocolClass:       params.ProtocolClass{Class: 1, ReturnOnError: req.ReturnOnError && i == 0},
