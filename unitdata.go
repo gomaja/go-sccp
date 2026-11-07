@@ -38,6 +38,17 @@ type UnitdataRequest struct {
 	// Data is the user data, 1 to 3952 octets (§4.1.1.1.1).
 	Data []byte
 
+	// MaxMessageSize is the largest SCCP message the request may produce, in
+	// octets: the maximum of the MTP-SAP its messages leave on, smaller or
+	// larger than the stack's, since the segment size follows "local knowledge
+	// of the network status" (ITU-T Q.714 (05/01) §4.1.1.1.2). Zero selects
+	// StackConfig.MaxMessageSize; otherwise it is 11 to MaxBroadbandMessageSize.
+	// One Stack thus serves routes of different sizes with one set of
+	// segmentation local references; two Stacks of one signalling point would
+	// allocate theirs independently and could give one calling party the same
+	// reference while either message is reassembled (§§4.1.1.1.2, 4.1.1.2.2).
+	MaxMessageSize int
+
 	// DPC is the 14-bit point code of the SCCP node the message goes to.
 	// Zero selects the point code of CalledPartyAddress.
 	DPC uint32
@@ -45,8 +56,8 @@ type UnitdataRequest struct {
 
 // Unitdata runs an N-UNITDATA request.
 //
-// User data that fits one message within the maximum message size goes in a
-// UDT, or an XUDT when the request has an importance or the stack is
+// User data that fits one message within the request's maximum message size
+// goes in a UDT, or an XUDT when the request has an importance or the stack is
 // configured with UseXUDT. Longer user data is segmented into at most 16 XUDT
 // messages, ITU-T Q.714 (05/01) §4.1.1.1.2: every segment is protocol class 1
 // with the same called and calling party addresses, DPC and SLS, and carries
@@ -86,6 +97,13 @@ func (s *Stack) unitdata(now time.Time, req UnitdataRequest) ([]TransferRequest,
 		// octets then the error treatment shall apply."
 		return nil, fmt.Errorf("%w: %d octets of user data exceed %d", ErrSegmentation, len(req.Data), MaxLongData)
 	}
+	messageSize := req.MaxMessageSize
+	if messageSize == 0 {
+		messageSize = s.cfg.MaxMessageSize
+	}
+	if messageSize < minMessageSize || messageSize > MaxBroadbandMessageSize {
+		return nil, fmt.Errorf("%w: maximum message size %d, want %d to %d", ErrInvalidRequest, messageSize, minMessageSize, MaxBroadbandMessageSize)
+	}
 	if err := checkCalledAddress(req.CalledPartyAddress); err != nil {
 		return nil, err
 	}
@@ -112,7 +130,7 @@ func (s *Stack) unitdata(now time.Time, req UnitdataRequest) ([]TransferRequest,
 		return nil, fmt.Errorf("%w: destination point code %d exceeds %d", ErrInvalidRequest, dpc, params.MaxPointCode)
 	}
 	label := RoutingLabel{OPC: s.cfg.PointCode, DPC: dpc, SLS: s.sls(req.ProtocolClass, req.SequenceControl), NI: s.cfg.NetworkIndicator}
-	limits := MarshalOptions{MaxMessageSize: s.cfg.MaxMessageSize}
+	limits := MarshalOptions{MaxMessageSize: messageSize}
 
 	single := func() ([]TransferRequest, error) {
 		m := s.singleMessage(req)
@@ -133,7 +151,7 @@ func (s *Stack) unitdata(now time.Time, req UnitdataRequest) ([]TransferRequest,
 		// message: the parameters were checked above.
 	}
 
-	capacity := s.segmentCapacity(req)
+	capacity := s.segmentCapacity(req, messageSize)
 	if z != 0 {
 		capacity = min(capacity, z)
 	}
@@ -199,8 +217,8 @@ func (s *Stack) singleMessage(req UnitdataRequest) Message {
 // 247 octets with three-octet addresses and the segmentation parameter. It is
 // bounded by the data length indicator, the maximum message size and the
 // one-octet pointer to the optional part.
-func (s *Stack) segmentCapacity(req UnitdataRequest) int {
-	limits := MarshalOptions{MaxMessageSize: s.cfg.MaxMessageSize}
+func (s *Stack) segmentCapacity(req UnitdataRequest, messageSize int) int {
+	limits := MarshalOptions{MaxMessageSize: messageSize}
 	probe := &XUDT{
 		ProtocolClass:       params.ProtocolClass{Class: 1, ReturnOnError: req.ReturnOnError},
 		HopCounter:          s.cfg.HopCounter,

@@ -127,7 +127,7 @@ func TestBinarySearchesMatchLinearScan(t *testing.T) {
 			req.Importance = &imp
 		}
 
-		got := s.segmentCapacity(req)
+		got := s.segmentCapacity(req, limit)
 		want := 0
 		for n := 1; n <= maxData; n++ {
 			probe := &XUDT{ProtocolClass: params.ProtocolClass{Class: 1, ReturnOnError: req.ReturnOnError}, HopCounter: s.cfg.HopCounter,

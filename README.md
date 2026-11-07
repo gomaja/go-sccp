@@ -37,9 +37,10 @@ It requires Go 1.26 or later.
   order, unrecognised optional parameters (kept and re-encoded), a missing end of
   optional parameters octet, any spare bits.
 - **Connectionless stack** (Q.714 §4): UDT or XUDT for short user data, up to 16
-  XUDT segments for user data up to 3952 octets, reassembly with T(reassembly),
-  duplicate and out-of-sequence detection and memory bounds, and the message
-  return procedure with the Q.713 §3.12 causes, once per failed message.
+  XUDT segments for user data up to 3952 octets, a per-request MTP-SAP limit
+  with `UnitdataRequest.MaxMessageSize`, reassembly with T(reassembly), duplicate
+  and out-of-sequence detection and memory bounds, and the message return
+  procedure with the Q.713 §3.12 causes, once per failed message.
 - **Connection-oriented stack** (Q.714 §3), protocol class 2: establishment,
   refusal, release with T(rel)/T(repeat rel)/T(int), frozen references,
   inactivity control, M-bit segmentation and reassembly within memory bounds,
@@ -92,6 +93,9 @@ func main() {
 `MarshalOptions{MaxMessageSize: n}.Marshal(m)` encodes for another maximum, up
 to `sccp.MaxBroadbandMessageSize` (4091 octets) where every MTP-SAP is
 broadband, which long unitdata (LUDT) needs.
+
+`UnitdataRequest.MaxMessageSize` selects that maximum for one N-UNITDATA
+request; zero uses `StackConfig.MaxMessageSize`.
 
 ## Stack
 

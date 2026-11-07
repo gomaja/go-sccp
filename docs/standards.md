@@ -5,7 +5,7 @@ message and parameter codecs of ITU-T Q.713 and the end-node procedures of
 ITU-T Q.714. This ledger records the documents the code follows, how each rule
 is applied, and what is deliberately out of scope.
 
-Last verified: 2026-10-11.
+Last verified: 2026-11-07.
 
 ## Normative SCCP Baseline
 
@@ -175,6 +175,13 @@ fits.
 
 - User data that fits one message goes in a UDT, or an XUDT when an importance
   is requested or the stack is configured for XUDT.
+- An N-UNITDATA request may name the maximum message size of the MTP-SAP it
+  leaves on (`UnitdataRequest.MaxMessageSize`, smaller or larger than the
+  stack's): the segment size follows "local knowledge of the network status"
+  (§4.1.1.1.2). One stack thus serves routes of different sizes from one set of
+  segmentation local references, which must be unique while a message is
+  reassembled (§4.1.1.1.2, §4.1.1.2.2); two stacks of one signalling point
+  would allocate the same references.
 - Longer user data is segmented into at most 16 XUDT messages (§4.1.1.1.2):
   class 1, identical addresses and routing label, the segmentation parameter on
   every segment with the F bit on the first, the remaining segment count, the

@@ -251,6 +251,115 @@ func TestUnitdataRejectsInvalidRequests(t *testing.T) {
 	}
 }
 
+// TestUnitdataRequestMaxMessageSize checks that N-UNITDATA selects the limit
+// of its MTP-SAP, ITU-T Q.714 (05/01) §4.1.1.1.2.
+func TestUnitdataRequestMaxMessageSize(t *testing.T) {
+	clock := newClock()
+	s := newStack(t, clock, pcA, sccp.StackConfig{SegmentationReferenceFreeze: time.Minute})
+	data := payload(600)
+
+	segmented := request(data)
+	segmented.CalledPartyAddress = params.NewPointCodeAddress(pcB, 8)
+	segmented.CallingPartyAddress = params.NewPointCodeAddress(pcA, 7)
+	defaultTransfers := mustUnitdata(t, s, segmented)
+	defaultSegments := segmentsOf(t, defaultTransfers)
+	for i, tr := range defaultTransfers {
+		if len(tr.Data) > sccp.DefaultMaxMessageSize {
+			t.Errorf("default request transfer %d is %d octets", i, len(tr.Data))
+		}
+	}
+	small := segmented
+	small.MaxMessageSize = 200
+	smallTransfers := mustUnitdata(t, s, small)
+	smallSegments := segmentsOf(t, smallTransfers)
+	if got := len(smallTransfers[0].Data); got != 175 {
+		t.Fatalf("first 200-octet segment is %d octets, want 175", got)
+	}
+	for i, tr := range smallTransfers {
+		if len(tr.Data) > small.MaxMessageSize {
+			t.Errorf("200-octet request transfer %d is %d octets", i, len(tr.Data))
+		}
+	}
+	if defaultSegments[0].Segmentation.LocalReference == smallSegments[0].Segmentation.LocalReference {
+		t.Fatalf("268-octet and 200-octet requests reused segmentation local reference %#x", smallSegments[0].Segmentation.LocalReference)
+	}
+	againTransfers := mustUnitdata(t, s, segmented)
+	again := segmentsOf(t, againTransfers)
+	for i, tr := range againTransfers {
+		if len(tr.Data) > sccp.DefaultMaxMessageSize {
+			t.Errorf("repeated default request transfer %d is %d octets", i, len(tr.Data))
+		}
+	}
+	if again[0].Segmentation.LocalReference == defaultSegments[0].Segmentation.LocalReference || again[0].Segmentation.LocalReference == smallSegments[0].Segmentation.LocalReference {
+		t.Fatalf("frozen segmentation local reference reused: %#x", again[0].Segmentation.LocalReference)
+	}
+
+	gt, err := params.NewGlobalTitle4(0, params.NPISDNTelephony, params.NAIInternationalNumber, "12345678901234567890")
+	if err != nil {
+		t.Fatal(err)
+	}
+	large := request(payload(250))
+	large.CalledPartyAddress = params.NewGlobalTitleAddress(gt, 8)
+	large.MaxMessageSize = sccp.MaxBroadbandMessageSize
+	if b, err := (sccp.MarshalOptions{MaxMessageSize: large.MaxMessageSize}).Marshal(&sccp.UDT{ProtocolClass: params.ProtocolClass{Class: 1, ReturnOnError: large.ReturnOnError}, CalledPartyAddress: large.CalledPartyAddress, CallingPartyAddress: large.CallingPartyAddress, Data: large.Data}); err != nil || len(b) <= sccp.DefaultMaxMessageSize {
+		t.Fatalf("broadband UDT = %d octets, %v; want one message above %d", len(b), err, sccp.DefaultMaxMessageSize)
+	}
+	largeTransfers := mustUnitdata(t, s, large)
+	if len(largeTransfers) != 1 {
+		t.Fatalf("broadband request sent %d transfers, want one", len(largeTransfers))
+	}
+	for i, tr := range largeTransfers {
+		if len(tr.Data) > large.MaxMessageSize {
+			t.Errorf("broadband request transfer %d is %d octets", i, len(tr.Data))
+		}
+	}
+	defaultLarge := large
+	defaultLarge.MaxMessageSize = 0
+	defaultLargeTransfers := mustUnitdata(t, s, defaultLarge)
+	if len(defaultLargeTransfers) < 2 {
+		t.Fatalf("default-size request sent %d transfers, want segmentation", len(defaultLargeTransfers))
+	}
+	for i, tr := range defaultLargeTransfers {
+		if len(tr.Data) > sccp.DefaultMaxMessageSize {
+			t.Errorf("default request transfer %d is %d octets", i, len(tr.Data))
+		}
+	}
+
+	smallerStack := newStack(t, clock, pcA, sccp.StackConfig{MaxMessageSize: 200})
+	largerRequest := segmented
+	largerRequest.MaxMessageSize = sccp.DefaultMaxMessageSize
+	largerTransfers := mustUnitdata(t, smallerStack, largerRequest)
+	if len(largerTransfers) != 3 {
+		t.Fatalf("268-octet request on a 200-octet stack sent %d transfers, want 3", len(largerTransfers))
+	}
+	for i, tr := range largerTransfers {
+		if len(tr.Data) > largerRequest.MaxMessageSize {
+			t.Errorf("268-octet request transfer %d is %d octets", i, len(tr.Data))
+		}
+	}
+
+	for _, size := range []int{-1, 10, sccp.MaxBroadbandMessageSize + 1} {
+		req := request([]byte("x"))
+		req.MaxMessageSize = size
+		if _, err := s.Unitdata(req); !errors.Is(err, sccp.ErrInvalidRequest) {
+			t.Errorf("maximum message size %d: %v, want ErrInvalidRequest", size, err)
+		}
+	}
+	for _, size := range []int{11, sccp.MaxBroadbandMessageSize} {
+		req := request([]byte("x"))
+		req.MaxMessageSize = size
+		res, err := s.Unitdata(req)
+		if errors.Is(err, sccp.ErrInvalidRequest) {
+			t.Errorf("maximum message size %d: %v, must not be ErrInvalidRequest", size, err)
+		}
+		for i, tr := range res.Transfers {
+			if len(tr.Data) > size {
+				t.Errorf("maximum message size %d transfer %d is %d octets", size, i, len(tr.Data))
+			}
+		}
+	}
+}
+
 // TestSegmentation checks ITU-T Q.714 (05/01) §4.1.1.1.2 on the segments of
 // one N-UNITDATA request.
 func TestSegmentation(t *testing.T) {

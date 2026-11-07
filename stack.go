@@ -234,11 +234,13 @@ type StackConfig struct {
 	// its point code there (ITU-T Q.711 (03/01) §6.1.1.2.2).
 	NetworkIndicator pointcode.NetworkIndicator
 
-	// MaxMessageSize is the largest SCCP message the stack sends, in octets.
-	// Zero selects DefaultMaxMessageSize, the narrowband MTP-SAP of ITU-T
-	// Q.711 (03/01) §7.1 a). Larger user data is segmented. It is at least
-	// 11 octets, an IT (ITU-T Q.713 (03/01) Table 18), so that every message
-	// the connection-oriented procedures must be able to send fits.
+	// MaxMessageSize is the largest SCCP message the stack sends, in octets,
+	// except for an N-UNITDATA request that names its own
+	// (UnitdataRequest.MaxMessageSize). Zero selects DefaultMaxMessageSize, the
+	// narrowband MTP-SAP of ITU-T Q.711 (03/01) §7.1 a). Larger user data is
+	// segmented. It is at least 11 octets, an IT (ITU-T Q.713 (03/01) Table
+	// 18), so that every message the connection-oriented procedures must be
+	// able to send fits.
 	MaxMessageSize int
 
 	// HopCounter is the hop counter of the XUDT, XUDTS, LUDT and LUDTS the
