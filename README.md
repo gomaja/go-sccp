@@ -94,8 +94,10 @@ func main() {
 to `sccp.MaxBroadbandMessageSize` (4091 octets) where every MTP-SAP is
 broadband, which long unitdata (LUDT) needs.
 
-`UnitdataRequest.MaxMessageSize` selects that maximum for one N-UNITDATA
-request; zero uses `StackConfig.MaxMessageSize`.
+`UnitdataRequest.MaxMessageSize` sets the maximum for one N-UNITDATA request,
+11 to `sccp.MaxBroadbandMessageSize` octets; zero uses
+`StackConfig.MaxMessageSize`, which also bounds everything else the stack
+sends: returned messages and the connection-oriented procedures.
 
 ## Stack
 

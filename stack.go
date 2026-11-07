@@ -47,7 +47,8 @@ type TransferRequest struct {
 	RoutingLabel
 	// Message is the message Data encodes.
 	Message Message
-	// Data is the encoded message, within the stack's maximum message size.
+	// Data is the encoded message, within the stack's maximum message size or
+	// the one its N-UNITDATA request names (UnitdataRequest.MaxMessageSize).
 	Data []byte
 }
 
