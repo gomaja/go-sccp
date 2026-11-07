@@ -252,6 +252,17 @@ type StackConfig struct {
 	// of a UDT. A request with an importance always uses an XUDT.
 	UseXUDT bool
 
+	// UseLUDT sends user data that no UDT or XUDT carries in one LUDT, when
+	// that fits the request's maximum message size, instead of segmenting
+	// it. LUDT is a network option (ITU-T Q.714 (05/01) §1.1.2) that a node
+	// on a narrowband path may not understand (§2.5). The LUDT carries the
+	// segmentation parameter so that a relay can segment it (§4.1.1.1.2,
+	// last item; ITU-T Q.713 (03/01) Table 21 Note 1). Within the 268 octets
+	// of the narrowband MTP-SAP an LUDT carries no more than a UDT or XUDT,
+	// so it is sent only under a larger maximum message size, the stack's or
+	// the request's.
+	UseLUDT bool
+
 	// SegmentationThreshold is Z of ITU-T Q.714 (05/01) §4.1.1.1.1: user data
 	// longer than Z octets is segmented into segments of at most Z octets even
 	// when it would fit one message, and user data of Z octets or less is not

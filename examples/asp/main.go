@@ -6,9 +6,9 @@
 Command sccp-asp sends SCCP connectionless user data from an M3UA ASP.
 
 It hands one N-UNITDATA request per -count to a go-sccp Stack and sends every
-message the stack produces — a UDT, or the XUDT segments of user data too long
-for one message — as M3UA DATA through go-m3ua's MTP-TRANSFER. Messages coming
-back from the SGP, such as a UDTS or XUDTS for undeliverable data, are passed
+message the stack produces — a UDT, XUDT segments, or one LUDT with -ludt
+and a larger -max-message-size — as M3UA DATA through go-m3ua's MTP-TRANSFER.
+Messages coming back from the SGP, such as a UDTS, XUDTS or LUDTS, are passed
 to the stack and printed as N-NOTICE indications.
 
 The default user data is a TCAP Begin carrying a GSM MAP unstructuredSS-Request,
@@ -58,6 +58,7 @@ func main() {
 		callingSSN  = flag.Uint("calling-ssn", 147, "Calling party subsystem number.")
 		class       = flag.Uint("class", 1, "SCCP protocol class, 0 or 1.")
 		maxMessage  = flag.Int("max-message-size", sccp.DefaultMaxMessageSize, "Largest SCCP message to send, in octets.")
+		ludt        = flag.Bool("ludt", false, "Send one LUDT when no UDT/XUDT carries the data and it fits the maximum message size.")
 		segmentAtZ  = flag.Int("segmentation-threshold", 0, "Z of ITU-T Q.714 §4.1.1.1.1: segment user data longer than this into segments of at most this length; 0 segments only what does not fit.")
 		returnOnErr = flag.Bool("return-on-error", true, "Request the message return procedure.")
 	)
@@ -81,6 +82,7 @@ func main() {
 		PointCode:             uint32(*opc),
 		NetworkIndicator:      ni,
 		MaxMessageSize:        *maxMessage,
+		UseLUDT:               *ludt,
 		SegmentationThreshold: *segmentAtZ,
 	})
 	if err != nil {

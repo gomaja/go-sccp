@@ -37,8 +37,9 @@ It requires Go 1.26 or later.
   order, unrecognised optional parameters (kept and re-encoded), a missing end of
   optional parameters octet, any spare bits.
 - **Connectionless stack** (Q.714 §4): UDT or XUDT for short user data, up to 16
-  XUDT segments for user data up to 3952 octets, a per-request MTP-SAP limit
-  with `UnitdataRequest.MaxMessageSize`, reassembly with T(reassembly), duplicate
+  XUDT segments for user data up to 3952 octets, one LUDT instead on a
+  broadband MTP-SAP (opt-in), a per-request MTP-SAP limit with
+  `UnitdataRequest.MaxMessageSize`, reassembly with T(reassembly), duplicate
   and out-of-sequence detection and memory bounds, and the message return
   procedure with the Q.713 §3.12 causes, once per failed message.
 - **Connection-oriented stack** (Q.714 §3), protocol class 2: establishment,
@@ -98,6 +99,11 @@ broadband, which long unitdata (LUDT) needs.
 11 to `sccp.MaxBroadbandMessageSize` octets; zero uses
 `StackConfig.MaxMessageSize`, which also bounds everything else the stack
 sends: returned messages and the connection-oriented procedures.
+
+With `StackConfig.UseLUDT`, user data that no UDT or XUDT carries goes in one
+LUDT when that fits the request's maximum, with the segmentation parameter for
+a relay that segments it (Q.713 Table 21 Note 1; Q.714 §4.1.1.1.2). Segments
+remain XUDTs.
 
 ## Stack
 
@@ -164,6 +170,9 @@ cd examples
 go run ./sgp -addr 127.0.0.1:2905
 go run ./asp -addr 127.0.0.1:2905 -segmentation-threshold 160
 ```
+
+The ASP's `-ludt` flag enables `UseLUDT`; pair it with
+`-max-message-size 4091` for a broadband MTP-SAP.
 
 SCTP needs Linux.
 
