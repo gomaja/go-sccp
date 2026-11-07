@@ -69,6 +69,11 @@ type UnitdataIndication struct {
 	MessageType         MsgType
 	CalledPartyAddress  params.PartyAddress
 	CallingPartyAddress params.PartyAddress
+	// Segmentation is the message's segmentation parameter, or the first
+	// segment's for a reassembled message, nil when it had none; the
+	// indication owns it. With RoutingLabel and CallingPartyAddress it
+	// identifies the reassembly (ITU-T Q.714 (05/01) §4.1.1.2.2).
+	Segmentation *params.Segmentation
 	// ProtocolClass is 1 when the sender asked for in-sequence delivery. For a
 	// reassembled message it is the in-sequence delivery option of its
 	// segmentation parameter (ITU-T Q.714 (05/01) §4.1.1.2.2).
@@ -130,6 +135,15 @@ type Discard struct {
 	// could not be decoded it is the first octet received, 0 when there was
 	// none.
 	MessageType MsgType
+	// For a UDT, XUDT or LUDT, CallingPartyAddress and Segmentation are its
+	// calling party address and segmentation parameter, nil when it has
+	// none, both owned by the Discard. With RoutingLabel they identify the
+	// reassembly a segment belongs to (ITU-T Q.714 (05/01) §4.1.1.2.2): the
+	// discard that ends a reassembly carries its first segment's label,
+	// address and parameter, the discard of the segment that ended it that
+	// segment's own. They are zero for other messages.
+	CallingPartyAddress params.PartyAddress
+	Segmentation        *params.Segmentation
 	// Reason matches one of the reasons below with errors.Is,
 	// ErrInvalidRequest for invalid MTP routing information, or for the
 	// connection-oriented procedures ErrConnectionNotFound,
@@ -445,6 +459,7 @@ func (s *Stack) SubsystemStatus(ssn uint8) (registered, available bool) {
 }
 
 // HandleTransfer runs the procedures for a message received from the MTP.
+// Results that end a reassembly carry the first segment's identity.
 //
 // LocalGlobalTitle is called before the stack is locked, so it may call the
 // Stack's methods.
@@ -534,6 +549,7 @@ func calledAddress(m Message) (params.PartyAddress, bool) {
 }
 
 // HandleTimeout runs the timers that are due.
+// A reassembly expiry discard carries the first segment's identity.
 func (s *Stack) HandleTimeout() Result {
 	now := s.cfg.Now()
 	s.mu.Lock()

@@ -150,6 +150,12 @@ for _, ind := range res.Indications {
 }
 ```
 
+`UnitdataIndication` and reassembly `Discard` results carry the first segment's
+`RoutingLabel`, `CallingPartyAddress` and an owned copy of `Segmentation`
+(Q.714 §4.1.1.2.2); a discarded triggering segment carries its own identity.
+A node that routes connectionless traffic itself can key its per-message state
+on this identity.
+
 Timers run when the caller asks: call `HandleTimeout` when `NextTimeout` says
 one is due, or let `RunTimers` do it in a goroutine. The clock is injectable
 (`StackConfig.Now`), so tests drive every timer without sleeping.

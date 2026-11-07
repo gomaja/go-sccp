@@ -210,8 +210,13 @@ fits.
   routing information, network included, and the segmentation local
   reference (§4.1.1.2.2). The SLS is part of the key: the segments of a
   message travel with "identical MTP routing information (DPC, SLS)"
-  (§4.1.1.1.2). Segments of any length are accepted
-  while the total stays within the first segment's length times the number of
+  (§4.1.1.1.2). The `UnitdataIndication` of a reassembled message and the
+  `Discard` that ends a process carry the first segment's routing label,
+  calling party address and segmentation parameter, which identify the
+  reassembly; the discard of the segment that ended it carries that
+  segment's own, and every reassembly error names the reference. Segments of
+  any length are accepted while the total stays within the first segment's
+  length times the number of
   segments (§4.1.1.2.1, §4.1.1.2.2). A failure ends the process and returns the
   first segment, its segmentation parameter unchanged (§4.1.1.2.3), when any
   segment of the process asked for return:
