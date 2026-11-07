@@ -8,7 +8,9 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"maps"
+	"strings"
 	"testing"
 	"time"
 
@@ -139,6 +141,9 @@ func FuzzUnitdataTransfer(f *testing.F) {
 				if !ok {
 					t.Fatalf("round trip indication: %T", ind)
 				}
+				if u.Segments > 1 && (u.Segmentation == nil || !u.Segmentation.FirstSegment || int(u.Segmentation.RemainingSegments) != u.Segments-1) {
+					t.Fatalf("reassembled indication has no first-segment identity: %+v", u)
+				}
 				delivered = append(delivered, u)
 			}
 		}
@@ -166,7 +171,17 @@ func FuzzUnitdataTransfer(f *testing.F) {
 					t.Fatalf("delivered %d octets", len(u.Data))
 				}
 			}
+			for _, ind := range res.Indications {
+				if u, ok := ind.(*UnitdataIndication); ok && u.Segments > 1 &&
+					(u.Segmentation == nil || !u.Segmentation.FirstSegment || int(u.Segmentation.RemainingSegments) != u.Segments-1) {
+					t.Fatalf("reassembled indication has no first-segment identity: %+v", u)
+				}
+			}
 			for _, d := range res.Discards {
+				if errors.Is(d.Reason, ErrReassembly) && (d.Segmentation == nil ||
+					!strings.Contains(d.Reason.Error(), fmt.Sprintf("reference %#06x", d.Segmentation.LocalReference))) {
+					t.Fatalf("reassembly discard has no reference: %+v", d)
+				}
 				if !errors.Is(d.Reason, ErrSyntax) && !errors.Is(d.Reason, ErrUndeliverable) && !errors.Is(d.Reason, ErrReassembly) &&
 					!errors.Is(d.Reason, ErrIncompleteAddress) && !errors.Is(d.Reason, ErrNotSupported) &&
 					!errors.Is(d.Reason, ErrConnectionNotFound) && !errors.Is(d.Reason, ErrConnectionReference) && !errors.Is(d.Reason, ErrConnectionState) {

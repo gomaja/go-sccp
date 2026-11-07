@@ -473,19 +473,19 @@ func (s *Stack) handleUnitdata(now time.Time, label RoutingLabel, m Message, loc
 	u := unitdataOf(label, m)
 	switch {
 	case u.class.Class > 1:
-		res.discard(label, u.typ, fmt.Errorf("%w: protocol class %d in a connectionless message", ErrSyntax, u.class.Class))
+		res.discardUnitdata(&u, fmt.Errorf("%w: protocol class %d in a connectionless message", ErrSyntax, u.class.Class))
 		return
 	case len(u.data) == 0:
 		// The data parameter carries at least one octet (ITU-T Q.713 (03/01)
 		// Tables 11, 19 and 21); an empty one is a construction error (Q.714
 		// (05/01) §3.8.3.3 b1), discarded (§4.3), with no user data to deliver.
-		res.discard(label, u.typ, fmt.Errorf("%w: no user data", ErrSyntax))
+		res.discardUnitdata(&u, fmt.Errorf("%w: no user data", ErrSyntax))
 		return
 	}
 	ssn, cause, verdict, reason := route(u.called, u.hop, u.hasHop, local)
 	switch verdict {
 	case routeDiscard:
-		res.discard(label, u.typ, reason)
+		res.discardUnitdata(&u, reason)
 		return
 	case routeReturn:
 		s.reject(&u, u.class.ReturnOnError, cause, undeliverable(cause), res)
@@ -507,6 +507,7 @@ func (s *Stack) handleUnitdata(now time.Time, label RoutingLabel, m Message, loc
 		MessageType:         u.typ,
 		CalledPartyAddress:  u.called,
 		CallingPartyAddress: u.calling,
+		Segmentation:        copySegmentation(u.segmentation),
 		ProtocolClass:       u.class.Class,
 		ReturnOnError:       u.class.ReturnOnError,
 		Importance:          u.importance,
@@ -527,10 +528,22 @@ func undeliverable(cause params.ReturnCause) error {
 	return fmt.Errorf("%w: %s", ErrUndeliverable, cause)
 }
 
+func copySegmentation(seg *params.Segmentation) *params.Segmentation {
+	if seg == nil {
+		return nil
+	}
+	return new(*seg)
+}
+
+func (r *Result) discardUnitdata(u *unitdata, reason error) {
+	r.Discards = append(r.Discards, Discard{RoutingLabel: u.label, MessageType: u.typ,
+		CallingPartyAddress: u.calling.Clone(), Segmentation: copySegmentation(u.segmentation), Reason: reason})
+}
+
 // reject records an undeliverable message as discarded and runs the message
 // return procedure for it when return on error was requested.
 func (s *Stack) reject(u *unitdata, returnOnError bool, cause params.ReturnCause, reason error, res *Result) {
-	res.discard(u.label, u.typ, reason)
+	res.discardUnitdata(u, reason)
 	if returnOnError {
 		s.returnMessage(u, cause, res)
 	}
@@ -575,7 +588,7 @@ func (s *Stack) returnMessage(u *unitdata, cause params.ReturnCause, res *Result
 		m, b, err = s.fitReturn(xudts, u.data)
 	}
 	if err != nil {
-		res.discard(u.label, u.typ, fmt.Errorf("%w: %s, and the service message cannot be built: %w", ErrUndeliverable, cause, err))
+		res.discardUnitdata(u, fmt.Errorf("%w: %s, and the service message cannot be built: %w", ErrUndeliverable, cause, err))
 		return
 	}
 	res.Transfers = append(res.Transfers, TransferRequest{RoutingLabel: originLabel(u.label, u.calling), Message: m, Data: b})
@@ -723,7 +736,7 @@ func (p *reassembly) firstSegment() *unitdata {
 func (s *Stack) reassemble(now time.Time, u *unitdata, ssn uint8, res *Result) {
 	calling, err := u.calling.MarshalBinary()
 	if err != nil {
-		res.discard(u.label, u.typ, fmt.Errorf("%w: calling party address: %w", ErrReassembly, err))
+		res.discardUnitdata(u, fmt.Errorf("%w: calling party address for reference %#06x: %w", ErrReassembly, u.segmentation.LocalReference, err))
 		return
 	}
 	seg := u.segmentation
@@ -735,7 +748,7 @@ func (s *Stack) reassemble(now time.Time, u *unitdata, ssn uint8, res *Result) {
 			// The rest of a failed message, duplicates included, and its
 			// first segment when that was never seen: discarded without
 			// another return.
-			res.discard(u.label, u.typ, fmt.Errorf("%w: segment of a failed message, reference %#06x", ErrReassembly, key.reference))
+			res.discardUnitdata(u, fmt.Errorf("%w: segment of a failed message, reference %#06x", ErrReassembly, key.reference))
 			return
 		}
 		// Another first segment starts a new message with the reference.
@@ -747,7 +760,7 @@ func (s *Stack) reassemble(now time.Time, u *unitdata, ssn uint8, res *Result) {
 		// §4.1.1.2.1: a first segment for a busy reference discards the
 		// segments received so far and returns the new message.
 		s.endReassembly(p)
-		res.discard(p.first.label, p.first.typ, fmt.Errorf("%w: a new first segment arrived for reference %#06x", ErrReassembly, key.reference))
+		res.discardUnitdata(&p.first, fmt.Errorf("%w: a new first segment arrived for reference %#06x", ErrReassembly, key.reference))
 		cause, reason := params.ReturnCauseErrorInMessageTransport, fmt.Errorf("%w: first segment for reference %#06x, which is busy", ErrReassembly, key.reference)
 		if c, ok := s.subsystemCause(ssn); !ok {
 			cause, reason = c, undeliverable(c)
@@ -764,7 +777,7 @@ func (s *Stack) reassemble(now time.Time, u *unitdata, ssn uint8, res *Result) {
 		// segments asked for it (§4.1.1.2.3).
 		p.returnOnError = p.returnOnError || u.class.ReturnOnError
 		s.failReassembly(now, p, cause, undeliverable(cause), res)
-		res.discard(u.label, u.typ, undeliverable(cause))
+		res.discardUnitdata(u, undeliverable(cause))
 		return
 	}
 
@@ -799,7 +812,7 @@ func (s *Stack) reassemble(now time.Time, u *unitdata, ssn uint8, res *Result) {
 			// §4.1.1.2.1 and §4.1.1.2.3.2: T(reassembly) expiry discards the
 			// message and is an error in message transport.
 			s.failReassembly(now, p, params.ReturnCauseErrorInMessageTransport,
-				fmt.Errorf("%w: T(reassembly) expired with %d of %d segments", ErrReassembly, p.segments-int(p.expected)-1, p.segments), res)
+				fmt.Errorf("%w: T(reassembly) expired for reference %#06x with %d of %d segments", ErrReassembly, key.reference, p.segments-int(p.expected)-1, p.segments), res)
 		})
 		return
 	}
@@ -818,28 +831,28 @@ func (s *Stack) reassemble(now time.Time, u *unitdata, ssn uint8, res *Result) {
 	case seg.RemainingSegments != p.expected:
 		// §4.1.1.2.2: out of sequence or duplicate: return, discard.
 		s.failReassembly(now, p, params.ReturnCauseErrorInMessageTransport,
-			fmt.Errorf("%w: segment with %d remaining, want %d", ErrReassembly, seg.RemainingSegments, p.expected), res)
-		res.discard(u.label, u.typ, fmt.Errorf("%w: out of sequence", ErrReassembly))
+			fmt.Errorf("%w: reference %#06x, segment with %d remaining, want %d", ErrReassembly, key.reference, seg.RemainingSegments, p.expected), res)
+		res.discardUnitdata(u, fmt.Errorf("%w: out of sequence for reference %#06x", ErrReassembly, key.reference))
 		return
 	case total > p.bound:
 		// §4.1.1.2.3.2: "the message length received exceeds the number of
 		// segments times the length of the first segment".
 		s.failReassembly(now, p, params.ReturnCauseErrorInMessageTransport,
-			fmt.Errorf("%w: %d octets exceed %d segments of %d octets", ErrReassembly, total, p.segments, p.firstLen), res)
-		res.discard(u.label, u.typ, fmt.Errorf("%w: segment too long", ErrReassembly))
+			fmt.Errorf("%w: reference %#06x, %d octets exceed %d segments of %d octets", ErrReassembly, key.reference, total, p.segments, p.firstLen), res)
+		res.discardUnitdata(u, fmt.Errorf("%w: segment too long for reference %#06x", ErrReassembly, key.reference))
 		return
 	case total > MaxLongData:
 		// §4.1.1.2.3.1: reassembly of more than the maximum supported data
 		// length, 3952 octets (clause 4, §4.1.1.1.1).
 		s.failReassembly(now, p, params.ReturnCauseDestinationCannotPerformReassembly,
-			fmt.Errorf("%w: %d octets exceed %d", ErrReassembly, total, MaxLongData), res)
-		res.discard(u.label, u.typ, fmt.Errorf("%w: message too long", ErrReassembly))
+			fmt.Errorf("%w: reference %#06x, %d octets exceed %d", ErrReassembly, key.reference, total, MaxLongData), res)
+		res.discardUnitdata(u, fmt.Errorf("%w: message too long for reference %#06x", ErrReassembly, key.reference))
 		return
 	case !s.roomFor(key.label.peer(), len(u.data)):
 		// §4.1.1.2.3.4: no buffer space to perform reassembly.
 		s.failReassembly(now, p, params.ReturnCauseNetworkCongestion,
 			fmt.Errorf("%w: no buffer space for reference %#06x", ErrReassembly, key.reference), res)
-		res.discard(u.label, u.typ, fmt.Errorf("%w: no buffer space for reference %#06x", ErrReassembly, key.reference))
+		res.discardUnitdata(u, fmt.Errorf("%w: no buffer space for reference %#06x", ErrReassembly, key.reference))
 		return
 	}
 	// The buffer grows to the exact length, so that MaxReassemblyOctets bounds
@@ -864,6 +877,7 @@ func (s *Stack) reassemble(now time.Time, u *unitdata, ssn uint8, res *Result) {
 		MessageType:         p.first.typ,
 		CalledPartyAddress:  p.first.called,
 		CallingPartyAddress: p.first.calling,
+		Segmentation:        copySegmentation(p.first.segmentation),
 		ProtocolClass:       class,
 		ReturnOnError:       p.returnOnError,
 		Importance:          p.first.importance,
@@ -883,7 +897,7 @@ func (s *Stack) reassemble(now time.Time, u *unitdata, ssn uint8, res *Result) {
 // discarded without a return.
 func (s *Stack) rejectSegment(now time.Time, key reassemblyKey, u *unitdata, cause params.ReturnCause, reason error, res *Result) {
 	if s.orphanRecords >= s.cfg.MaxReassemblies {
-		res.discard(u.label, u.typ, fmt.Errorf("%w, not returned: no room to record the failed message", reason))
+		res.discardUnitdata(u, fmt.Errorf("%w, not returned: no room to record the failed message", reason))
 		return
 	}
 	s.reject(u, u.class.ReturnOnError, cause, reason, res)
