@@ -249,7 +249,8 @@ type StackConfig struct {
 	HopCounter params.HopCounter
 
 	// UseXUDT sends user data that needs no segmentation in an XUDT instead
-	// of a UDT. A request with an importance always uses an XUDT.
+	// of a UDT. A request with an importance never goes in a UDT, which
+	// cannot carry one.
 	UseXUDT bool
 
 	// UseLUDT sends user data that no UDT or XUDT carries in one LUDT, when
