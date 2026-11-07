@@ -15,11 +15,11 @@ import (
 	"github.com/gomaja/go-sccp/params"
 )
 
-// FuzzUnitdataTransfer runs scripts of received messages, segments among them,
-// clock advances and subsystem changes against a stack with small reassembly
-// bounds. After every step it checks the reassembly bookkeeping (ITU-T Q.714
-// (05/01) §4.1.1.2) and that every message the stack sends is a valid service
-// message within the maximum message size.
+// FuzzUnitdataTransfer runs an N-UNITDATA request and scripts of received
+// messages, segments among them, clock advances and subsystem changes against
+// a stack with small reassembly bounds. After every step it checks the
+// reassembly bookkeeping (ITU-T Q.714 (05/01) §4.1.1.2) and that every message
+// the stack sends is a valid service message within its maximum message size.
 //
 // A script is a sequence of steps: an operation octet, then for a message a
 // two-octet length, least significant octet first, and the message octets.
@@ -43,15 +43,19 @@ func FuzzUnitdataTransfer(f *testing.F) {
 		}
 		return b
 	}
-	f.Add(script(step(0, segment(1, true, 2, 200, true)), step(0, segment(1, false, 1, 200, false)), step(0, segment(1, false, 0, 100, false))))
-	f.Add(script(step(0, segment(2, true, 2, 200, true)), step(0, segment(2, false, 0, 200, true)), step(0, segment(2, false, 1, 200, true))))
-	f.Add(script(step(0, segment(3, false, 3, 100, true)), step(0, segment(3, false, 2, 100, true)), step(2, nil), step(0, segment(3, false, 1, 100, true))))
-	f.Add(script(step(0, segment(4, true, 3, 240, true)), step(3, nil), step(0, segment(4, false, 2, 240, true)), step(3, nil), step(0, segment(4, true, 1, 50, false))))
-	f.Add(script(step(0, segment(5, true, 15, 240, true)), step(0, segment(6, true, 15, 240, true)), step(0, segment(7, true, 15, 240, true)), step(0, segment(8, true, 1, 10, true))))
+	f.Add(script(step(0, segment(1, true, 2, 200, true)), step(0, segment(1, false, 1, 200, false)), step(0, segment(1, false, 0, 100, false))), 0)
+	f.Add(script(step(0, segment(2, true, 2, 200, true)), step(0, segment(2, false, 0, 200, true)), step(0, segment(2, false, 1, 200, true))), 0)
+	f.Add(script(step(0, segment(3, false, 3, 100, true)), step(0, segment(3, false, 2, 100, true)), step(2, nil), step(0, segment(3, false, 1, 100, true))), 0)
+	f.Add(script(step(0, segment(4, true, 3, 240, true)), step(3, nil), step(0, segment(4, false, 2, 240, true)), step(3, nil), step(0, segment(4, true, 1, 50, false))), 0)
+	f.Add(script(step(0, segment(5, true, 15, 240, true)), step(0, segment(6, true, 15, 240, true)), step(0, segment(7, true, 15, 240, true)), step(0, segment(8, true, 1, 10, true))), 0)
 
-	f.Add(script(step(0, segment(9, true, 1, 200, true)), step(128, segment(9, true, 1, 200, true)), step(0, segment(9, false, 0, 100, false)), step(128, segment(9, false, 0, 100, false))))
+	f.Add(script(step(0, segment(9, true, 1, 200, true)), step(128, segment(9, true, 1, 200, true)), step(0, segment(9, false, 0, 100, false)), step(128, segment(9, false, 0, 100, false))), 0)
 
-	f.Fuzz(func(t *testing.T, script []byte) {
+	for _, size := range []int{0, minMessageSize, DefaultMaxMessageSize, MaxBroadbandMessageSize, -1, minMessageSize - 1, MaxBroadbandMessageSize + 1} {
+		f.Add(script(), size)
+	}
+
+	f.Fuzz(func(t *testing.T, script []byte, size int) {
 		now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 		s, err := NewStack(StackConfig{PointCode: 2, MaxReassemblies: 3, MaxReassemblyOctets: 600, MaxReassemblyOctetsPerPeer: 400,
 			ReassemblyTimeout: 10 * time.Second, Now: func() time.Time { return now }})
@@ -59,6 +63,25 @@ func FuzzUnitdataTransfer(f *testing.F) {
 			t.Fatal(err)
 		}
 		s.RegisterSubsystem(8)
+		effectiveSize := size
+		if effectiveSize == 0 {
+			effectiveSize = s.cfg.MaxMessageSize
+		}
+		outbound, requestErr := s.Unitdata(UnitdataRequest{CalledPartyAddress: params.NewSSNAddress(8), CallingPartyAddress: params.NewSSNAddress(7), ProtocolClass: 1, Data: make([]byte, 600), DPC: 2, MaxMessageSize: size})
+		if size != 0 && (size < minMessageSize || size > MaxBroadbandMessageSize) {
+			if !errors.Is(requestErr, ErrInvalidRequest) {
+				t.Fatalf("N-UNITDATA maximum %d: %v, want ErrInvalidRequest", size, requestErr)
+			}
+		} else {
+			if errors.Is(requestErr, ErrInvalidRequest) {
+				t.Fatalf("N-UNITDATA maximum %d: %v", size, requestErr)
+			}
+			for _, out := range outbound.Transfers {
+				if len(out.Data) > effectiveSize {
+					t.Fatalf("N-UNITDATA maximum %d sent %d octets", effectiveSize, len(out.Data))
+				}
+			}
+		}
 		available := true
 		check := func(res Result) {
 			t.Helper()
