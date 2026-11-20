@@ -102,6 +102,11 @@ func main() {
 
 	endpoint, err := m3ua.NewEndpoint(m3ua.EndpointConfig{
 		Role: m3ua.RoleASP,
+		// go-m3ua infers no SS7 congestion method from the NI or the message
+		// priority (go-m3ua #232; RFC 4666 §3.3.1, §3.4.4). The example sends
+		// message priority 0, so it takes the international method, which has
+		// no priorities (Q.704 (07/96) §11.2.3).
+		Congestion: &m3ua.CongestionConfig{Default: m3ua.CongestionProfile{Method: m3ua.CongestionInternational}},
 		ASP: &m3ua.ASPConfig{
 			SignallingGateways: []m3ua.SignallingGatewayConfig{{
 				ID: peer.SignallingGateway,

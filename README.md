@@ -180,6 +180,9 @@ go run ./asp -addr 127.0.0.1:2905 -segmentation-threshold 160
 The ASP's `-ludt` flag enables `UseLUDT`; pair it with
 `-max-message-size 4091` for a broadband MTP-SAP.
 
+go-m3ua makes every endpoint name its SS7 congestion method; both examples
+select `CongestionInternational`, since they send message priority 0 only.
+
 SCTP needs Linux.
 
 ## Validation
