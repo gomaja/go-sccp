@@ -3,7 +3,7 @@ module github.com/gomaja/go-sccp/examples
 go 1.26
 
 require (
-	github.com/gomaja/go-m3ua v0.0.0-20261120080009-f9898712ea7e
+	github.com/gomaja/go-m3ua v0.0.0-20261121221715-184d9ca3a994
 	github.com/gomaja/go-pointcode v0.0.0-20261015102047-53f963a604bd
 	github.com/gomaja/go-sccp v0.0.0
 	github.com/gomaja/go-sctp v0.0.0-20261112061005-2d7d4d9cb936
